@@ -11,7 +11,8 @@ import Control.Applicative
 
 import Data.Proxy
 import Database.PostgreSQL.Simple.Dsl
-import Database.PostgreSQL.Simple           (Connection, connect)
+import Database.PostgreSQL.Simple.Dsl.Entity
+import Database.PostgreSQL.Simple           (Connection, connectPostgreSQL)
 import Database.PostgreSQL.Simple.FromField hiding (Field, fromField)
 import Database.PostgreSQL.Simple.FromRow
 import Database.PostgreSQL.Simple.ToField
@@ -37,7 +38,7 @@ data Role = Role { roleUserId :: UserId, roleName :: ByteString }
 data instance Field User t a where
   UserId'   :: Field User "id" UserId
   UserLogin :: Field User "login" String
-  UserPass  :: Field User "password" ByteString
+  UserPass  :: Field User "passwd" ByteString
 
 instance Table User where
   tableName _ = "users"
@@ -46,15 +47,17 @@ instance Selectable User where
   entityParser _ = User <$> fromField UserId'
                         <*> fromField UserLogin
                         <*> fromField UserPass
-instance FromRow User where
-  fromRow = entityRowParser $ entityParser (undefined :: Proxy User)
+
+instance Entity User where
+  type EntityId User = UserId
+  type EntityIdColumn User = "id"
 
 data instance Field Role t a where
   RoleUserId :: Field Role "user_id" UserId
-  RoleName   :: Field Role "name" ByteString
+  RoleName   :: Field Role "role" ByteString
 
 instance Table Role where
-  tableName _ = "roles"
+  tableName _ = "project_roles"
 
 instance Selectable Role where
   entityParser _ = Role <$> fromField RoleUserId
@@ -73,9 +76,24 @@ allRoles :: Query (Whole Role)
 allRoles = fromTable
 
 -- | all roles for login
-userRoles :: String -> Query (Only ByteString)
+userRoles :: String -> Query (ByteString, UserId)
 userRoles login =
   innerJoin (\(usr :. rol) -> usr ~> UserId' ==. rol ~> RoleUserId)
             (allUsers & where_ (\u -> u~>UserLogin ==. val login))
             allRoles
-  & project (\(usr :. rol) -> only $ rol~>RoleName)
+  & project (\(usr :. rol) -> (rol~>RoleName, rol~>RoleUserId))
+
+userRoles2 = crossJoin fromTable fromTable
+           & where_ (\(u:.rol) -> u~>UserId' ==. rol~>RoleUserId)
+
+main = do
+  con <- connectPostgreSQL "dbname=testdb user=test password=batman"
+  formatQuery con (userRoles "foo")
+  usrs <- select con (userRoles "oleg")
+  mapM_ print usrs
+  let q = userRoles2 & where_ (\(u:._)->u~>UserId' ==. val (UserId 2))
+  mapM_ print =<< select con q
+  print =<< formatQuery con q
+  print =<< formatQuery con (crossJoin q $ userRoles "a")
+  print =<< select con (crossJoin q $ userRoles "a")
+

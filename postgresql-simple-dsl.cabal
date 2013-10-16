@@ -19,6 +19,7 @@ library
   exposed-modules:
      Database.PostgreSQL.Simple.Dsl
      Database.PostgreSQL.Simple.Dsl.Internal
+     Database.PostgreSQL.Simple.Dsl.Entity
   other-modules:
   -- other-extensions:
   build-depends:       base >=4.6 && <4.7,

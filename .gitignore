@@ -1,5 +1,6 @@
 .*
 cabal.sandbox.config
 dist/*
+examples/dist/*
 *~
 TAGS

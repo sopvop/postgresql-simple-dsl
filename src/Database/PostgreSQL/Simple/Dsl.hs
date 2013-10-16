@@ -10,9 +10,11 @@ module Database.PostgreSQL.Simple.Dsl
      , fromTable
      , with
      , innerJoin
+     , crossJoin
      , where_
      , project
      , orderBy
+     , orderOn
      , limitTo
      , offsetTo
      , val
@@ -49,7 +51,7 @@ import qualified Database.PostgreSQL.Simple              as PG
 import           Database.PostgreSQL.Simple.Dsl.Internal
 import           Database.PostgreSQL.Simple.ToField
 
--- | Start query with table
+-- | Start query with table - SELECT table.*
 fromTable :: forall a . (Table a, Selectable a) => Query (Whole a)
 fromTable = Query $ do
   nm <- grabName
@@ -59,7 +61,7 @@ fromTable = Query $ do
   where
     tn = tableName (undefined :: Proxy a)
 
--- | Add CTE query
+-- | Adds non recursive WITH query
 with :: (IsExpr with, IsExpr a) => Query with -> Query a -> Query (a :. with)
 with (Query w) (Query s) = Query $ do
   nm <- grabName
@@ -74,7 +76,8 @@ with (Query w) (Query s) = Query $ do
               , selectExpr = newExpr
               , selectFrom = (selectFrom sq `D.snoc` plain ",") `D.append` nameBld } )
 
--- | Inner join on bool expression
+-- | Inner join on bool expression. Joins 'WHERE' clauses using AND
+--   drops ORDER BY, LIMIT, OFFSET.
 innerJoin :: (AsExpr a :. AsExpr b -> Expr Bool) -> Query a -> Query b
          -> Query (a :. b)
 innerJoin f (Query left) (Query right) = Query $ do
@@ -83,8 +86,8 @@ innerJoin f (Query left) (Query right) = Query $ do
   let lexp = selectExpr leftq
       rexp = selectExpr rightq
       cond = getBuilder . getRawExpr $ f (lexp :. rexp)
-      fromClause = ((selectFrom leftq `D.snoc` plain ",")
-                   `D.snoc` plain " INNER JOIN ") `D.append` selectFrom rightq
+      fromClause =  (selectFrom leftq `D.snoc` plain " INNER JOIN ")
+                   `D.append` selectFrom rightq
                    `D.snoc` plain " ON " `D.append` cond
       whereClause = case selectWhere leftq of
         Nothing -> selectWhere rightq
@@ -93,7 +96,23 @@ innerJoin f (Query left) (Query right) = Query $ do
           Just ex' -> Just (mkAnd ex ex')
   return $ (mkSelect fromClause (lexp :. rexp) ) { selectWhere = whereClause }
 
+-- | Do a cross join, SELECT .. FROM a,b
+crossJoin :: Query a -> Query b -> Query (a :. b)
+crossJoin (Query left) (Query right) = Query $ do
+  leftq  <- left
+  rightq <- right
+  let lexp = selectExpr leftq
+      rexp = selectExpr rightq
+      fromClause =  (selectFrom leftq `D.snoc` plain ",")
+                   `D.append` selectFrom rightq
+      whereClause = case selectWhere leftq of
+        Nothing -> selectWhere rightq
+        Just ex -> case selectWhere leftq of
+          Nothing -> Just ex
+          Just ex' -> Just (mkAnd ex ex')
+  return $ (mkSelect fromClause (lexp :. rexp) ) { selectWhere = whereClause }
 
+-- | Append expression to WHERE clause
 where_ :: (AsExpr a -> Expr Bool) -> Query a -> Query a
 where_ f (Query mq) = Query $ do
     q <- mq
@@ -103,6 +122,7 @@ where_ f (Query mq) = Query $ do
            Just x -> Just $ mkAnd x extra
     return $ q { selectWhere = newSel }
 
+-- | Replace ORDER BY clause
 orderBy :: (AsExpr a -> [Sorting]) -> Query a -> Query a
 orderBy f (Query mq) = Query $ do
   q <- mq
@@ -110,23 +130,36 @@ orderBy f (Query mq) = Query $ do
                              . map compileSorting $ f (selectExpr q)
   return q { selectOrder = selectOrder q <> sort }
 
+-- | append to ORDER BY clase
+orderOn :: (AsExpr a -> Sorting) -> Query a -> Query a
+orderOn f (Query mq) = Query $ do
+  q <- mq
+  let start = case selectOrder q of
+                 Nothing -> mempty
+                 Just order -> order `D.snoc` plain ","
+      sort = Just $ start `D.append` compileSorting (f $ selectExpr q)
+  return q { selectOrder = selectOrder q <> sort }
+
+-- | set LIMIT
 limitTo :: Int -> Query a -> Query a
 limitTo i (Query mq) = Query $ do
   q <- mq
   return $ q { selectLimit = Just i }
 
+-- | set OFFSET
 offsetTo :: Int -> Query a -> Query a
 offsetTo i (Query mq) = Query $ do
   q <- mq
   return $ q { selectOffset = Just i }
 
+-- | Select only subset of data
 project :: (AsExpr a -> AsExpr b) -> Query a -> Query b
 project f (Query mq) = Query $ do
     q <- mq
     let newExpr = f (selectExpr q)
     return $ q { selectExpr = newExpr}
 
-
+-- | Execute query
 select :: (IsExpr a, FromRow a) => Connection -> Query a -> IO [a]
 select c q = query c "?" (Only $ finishSelect q)
 

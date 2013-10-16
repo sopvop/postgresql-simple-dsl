@@ -17,7 +17,6 @@ import           Data.List                            (intersperse)
 import           Data.Monoid
 import           Data.Proxy                           (Proxy)
 
-import           Blaze.ByteString.Builder             (Builder)
 import           Blaze.ByteString.Builder.ByteString  as B
 import           Blaze.ByteString.Builder.Char8       as B
 
@@ -30,7 +29,7 @@ import           Database.PostgreSQL.Simple.FromRow
 import           Database.PostgreSQL.Simple.ToField
 
 -- | Wrapper for selecting whole entity
-newtype Whole a = Whole { getWhole :: a }
+newtype Whole a = Whole { getWhole :: a } deriving (Eq, Ord, Show)
 
 instance Selectable a => FromRow (Whole a) where
   fromRow = fmap Whole . entityRowParser $ entityParser (undefined :: Proxy a)
@@ -116,7 +115,6 @@ mkAccess :: RawExpr -> RawExpr -> DList Action
 mkAccess a b = D.append (addParens a) (plain "." `D.cons` (addParens b))
 
 
-
 data GroupByExpr = GroupByExpr
      { groupByCols    :: [RawExpr]
      , groupByHavings :: Maybe RawExpr
@@ -132,10 +130,6 @@ instance Monoid GroupByExpr where
         Just ah'-> case bh of
           Nothing -> Just ah'
           Just bh' -> Just $ mkAnd ah' bh'
-
-data CompiledFrom = FromTable Builder
-                  | InnerJoin CompiledFrom CompiledFrom (Expr Bool)
-                  | CrossJoin CompiledFrom Builder
 
 data Select a = Select { selectFrom   :: ExprBuilder
                        , selectWith   :: [D.DList Action]
