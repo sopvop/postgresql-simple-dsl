@@ -11,7 +11,7 @@ import Control.Applicative
 
 import Data.Proxy
 import Database.PostgreSQL.Simple.Dsl
-import Database.PostgreSQL.Simple           (Connection)
+import Database.PostgreSQL.Simple           (Connection, connect)
 import Database.PostgreSQL.Simple.FromField hiding (Field, fromField)
 import Database.PostgreSQL.Simple.FromRow
 import Database.PostgreSQL.Simple.ToField
@@ -63,17 +63,17 @@ instance Selectable Role where
 instance FromRow Role where
   fromRow = entityRowParser $ entityParser (undefined :: Proxy Role)
 
-getAllUsers :: Connection -> IO [User]
+getAllUsers :: Connection -> IO [Whole User]
 getAllUsers c = select c $ fromTable
 
-allUsers :: Query (Expr (Whole User))
+allUsers :: Query (Whole User)
 allUsers = fromTable
 
-allRoles :: Query (Expr (Whole Role))
+allRoles :: Query (Whole Role)
 allRoles = fromTable
 
 -- | all roles for login
-userRoles :: String -> Query (Expr (Only ByteString))
+userRoles :: String -> Query (Only ByteString)
 userRoles login =
   innerJoin (\(usr :. rol) -> usr ~> UserId' ==. rol ~> RoleUserId)
             (allUsers & where_ (\u -> u~>UserLogin ==. val login))

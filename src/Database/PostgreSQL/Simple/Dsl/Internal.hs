@@ -1,14 +1,8 @@
-{-# LANGUAGE DataKinds              #-}
-{-# LANGUAGE FlexibleContexts       #-}
-{-# LANGUAGE FlexibleInstances      #-}
-{-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE KindSignatures         #-}
-{-# LANGUAGE MultiParamTypeClasses  #-}
-{-# LANGUAGE OverloadedStrings      #-}
-{-# LANGUAGE ScopedTypeVariables    #-}
-{-# LANGUAGE TypeFamilies           #-}
-{-# LANGUAGE TypeOperators          #-}
-{-# LANGUAGE UndecidableInstances   #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
 
 module Database.PostgreSQL.Simple.Dsl.Internal
        where
@@ -35,7 +29,11 @@ import           Database.PostgreSQL.Simple.FromField hiding (Field)
 import           Database.PostgreSQL.Simple.FromRow
 import           Database.PostgreSQL.Simple.ToField
 
-data Whole a -- | Marker for selecting "whole" entity
+-- | Wrapper for selecting whole entity
+newtype Whole a = Whole { getWhole :: a }
+
+instance Selectable a => FromRow (Whole a) where
+  fromRow = fmap Whole . entityRowParser $ entityParser (undefined :: Proxy a)
 
 -- | Data family describing columns
 data family Field v (t :: Symbol) b :: *
@@ -146,11 +144,10 @@ data Select a = Select { selectFrom   :: ExprBuilder
                        , selectOrder  :: Maybe ExprBuilder
                        , selectLimit  :: Maybe Int
                        , selectOffset :: Maybe Int
-                       , selectExpr   :: a
+                       , selectExpr   :: (AsExpr a)
                        }
 
-
-mkSelect :: ExprBuilder -> a -> Select a
+mkSelect :: ExprBuilder -> (AsExpr a) -> Select a
 mkSelect c a = Select c [] Nothing Nothing Nothing Nothing Nothing a
 
 -- | Source of uniques
@@ -166,50 +163,62 @@ grabName = do
   put (NameSource $ succ num)
   return . RawTerm . D.singleton . Plain $ B.fromChar 'q' <> B.fromShow num
 
-class Projection a b | a -> b where
-  toProjection :: a -> [RawExpr]
-  makeSubSelects :: RawExpr -> a -> State NameSource (a, a)
-    -- ^ return renamed and references to it from action
 
-mkSubSelect :: RawExpr -> RawExpr -> Expr a
-mkSubSelect s nm = Expr . RawExpr $ mkAccess s nm
-mkRename :: RawExpr -> RawExpr -> Expr a
-mkRename a nm = binOp (plain " AS ") a nm
+type family FromExpr a :: *
+type instance FromExpr (Expr (Whole a)) = Whole a
+type instance FromExpr (Expr (Only a)) = Only a
+type instance FromExpr (Expr a, Expr b) = (a,b)
+type instance FromExpr (Expr a, Expr b, Expr c) = (a,b,c)
+type instance FromExpr (Expr a, Expr b, Expr c, Expr d) = (a,b,c,d)
+type instance FromExpr (Expr a, Expr b, Expr c, Expr d, Expr e) = (a,b,c,d,e)
+type instance FromExpr (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) = (a,b,c,d,e,f)
+type instance FromExpr (a :. b) = (FromExpr a :. FromExpr b)
 
-instance Selectable a => Projection (Expr (Whole a)) a where
-  toProjection (Expr a) = map (RawExpr . mkAccess a . mkTerm) columns
+
+class (FromExpr (AsExpr a) ~ a) => IsExpr a where
+  type AsExpr a :: *
+  compileProjection :: AsExpr a -> [RawExpr]
+  makeSubRename :: RawExpr -> AsExpr a -> State NameSource (AsExpr a, AsExpr a)
+
+instance Selectable a => IsExpr (Whole a) where
+  type AsExpr (Whole a) = Expr (Whole a)
+  compileProjection (Expr a) = map (RawExpr . mkAccess a . mkTerm) columns
     where
       columns = entityColumns $ entityParser (undefined :: Proxy a)
-  makeSubSelects t (Expr a) = do
+  makeSubRename t (Expr a) = do
     return $ (Expr a,  Expr t)
 
 
-instance Projection (Expr (Only a)) (Only a) where
-  toProjection (Expr a) = [a]
-  makeSubSelects s (Expr a) = do
+instance IsExpr (Only a) where
+  type AsExpr (Only a) = Expr (Only a)
+  compileProjection (Expr a) = [a]
+  makeSubRename s (Expr a) = do
     nm <- grabName
     return (mkRename a nm, mkSubSelect s nm)
 
-instance Projection (Expr a, Expr b) (a,b) where
-  toProjection (Expr a, Expr b) = [a, b]
-  makeSubSelects t (Expr a, Expr b) = do
+instance IsExpr (a,b) where
+  type AsExpr (a,b) = (Expr a, Expr b)
+  compileProjection (Expr a, Expr b) = [a, b]
+  makeSubRename t (Expr a, Expr b) = do
     nm1 <- grabName
     nm2 <- grabName
     return ((mkRename a nm1, mkRename b nm2)
            ,(mkSubSelect t nm1, mkSubSelect t nm2))
 
-instance Projection (Expr a, Expr b, Expr c) (a,b,c) where
-  toProjection (Expr a, Expr b, Expr c) = [a, b, c]
-  makeSubSelects t (Expr a, Expr b, Expr c) = do
+instance IsExpr (a,b,c) where
+  type AsExpr (a,b,c) = (Expr a, Expr b, Expr c)
+  compileProjection (Expr a, Expr b, Expr c) = [a, b, c]
+  makeSubRename t (Expr a, Expr b, Expr c) = do
     nm1 <- grabName
     nm2 <- grabName
     nm3 <- grabName
     return ((mkRename a nm1, mkRename b nm2, mkRename c nm3)
            ,(mkSubSelect t nm1, mkSubSelect t nm2, mkSubSelect t nm3))
 
-instance Projection (Expr a, Expr b, Expr b, Expr c) (a,b,c,d) where
-  toProjection (Expr a, Expr b, Expr c, Expr d) = [a, b, c ,d]
-  makeSubSelects t (Expr a, Expr b, Expr c, Expr d) = do
+instance IsExpr (a,b,c,d) where
+  type AsExpr (a,b,c,d) = (Expr a, Expr b, Expr c, Expr d)
+  compileProjection (Expr a, Expr b, Expr c, Expr d) = [a, b, c ,d]
+  makeSubRename t (Expr a, Expr b, Expr c, Expr d) = do
     nm1 <- grabName
     nm2 <- grabName
     nm3 <- grabName
@@ -217,9 +226,10 @@ instance Projection (Expr a, Expr b, Expr b, Expr c) (a,b,c,d) where
     return ((mkRename a nm1, mkRename b nm2, mkRename c nm3, mkRename d nm4)
            ,(mkSubSelect t nm1, mkSubSelect t nm2, mkSubSelect t nm3, mkSubSelect t nm4))
 
-instance Projection (Expr a, Expr b, Expr b, Expr c, Expr e) (a,b,c,d,e) where
-  toProjection (Expr a, Expr b, Expr c, Expr d, Expr e) = [a, b, c ,d,e]
-  makeSubSelects t (Expr a, Expr b, Expr c, Expr d, Expr e) = do
+instance IsExpr (a,b,c,d,e) where
+  type AsExpr (a,b,c,d,e) = (Expr a, Expr b, Expr c, Expr d, Expr e)
+  compileProjection (Expr a, Expr b, Expr c, Expr d, Expr e) = [a, b, c, d,e]
+  makeSubRename t (Expr a, Expr b, Expr c, Expr d, Expr e) = do
     nm1 <- grabName
     nm2 <- grabName
     nm3 <- grabName
@@ -229,9 +239,10 @@ instance Projection (Expr a, Expr b, Expr b, Expr c, Expr e) (a,b,c,d,e) where
            ,(mkSubSelect t nm1, mkSubSelect t nm2, mkSubSelect t nm3, mkSubSelect t nm4
                          ,mkSubSelect t nm5))
 
-instance Projection (Expr a, Expr b, Expr b, Expr c, Expr e, Expr f) (a,b,c,d,e,f) where
-  toProjection (Expr a, Expr b, Expr c, Expr d, Expr e,Expr f) = [a, b, c ,d,e,f]
-  makeSubSelects t (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) = do
+instance IsExpr (a,b,c,d,e,f) where
+  type AsExpr (a,b,c,d,e,f) = (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f)
+  compileProjection (Expr a, Expr b, Expr c, Expr d, Expr e,Expr f) = [a, b, c ,d,e,f]
+  makeSubRename t (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) = do
     nm1 <- grabName
     nm2 <- grabName
     nm3 <- grabName
@@ -243,18 +254,25 @@ instance Projection (Expr a, Expr b, Expr b, Expr c, Expr e, Expr f) (a,b,c,d,e,
            ,(mkSubSelect t nm1, mkSubSelect t nm2, mkSubSelect t nm3, mkSubSelect t nm4
                          ,mkSubSelect t nm5, mkSubSelect t nm6))
 
-instance (Projection a c, Projection b d) => Projection (a :. b) (c:.d) where
-  toProjection (a :. b) = toProjection a <> toProjection b
-  makeSubSelects t (a :. b) = do
-     (rena, suba) <- makeSubSelects t a
-     (renb, subb) <- makeSubSelects t b
+instance (IsExpr a, IsExpr b) => IsExpr (a:.b) where
+  type AsExpr (a :. b) = (AsExpr a :. AsExpr b)
+  compileProjection (a :. b) = compileProjection a <> compileProjection b
+  makeSubRename t (a :. b) = do
+     (rena, suba) <- makeSubRename t a
+     (renb, subb) <- makeSubRename t b
      return ((rena :. renb), (suba :. subb))
 
 
-finishSelect :: Projection a b => Query a -> Action
+mkSubSelect :: RawExpr -> RawExpr -> Expr a
+mkSubSelect s nm = Expr . RawExpr $ mkAccess s nm
+mkRename :: RawExpr -> RawExpr -> Expr a
+mkRename a nm = binOp (plain " AS ") a nm
+
+
+finishSelect :: IsExpr a => Query a -> Action
 finishSelect (Query q) = Many . D.toList $ compileSelect $ fst (runState q (NameSource 0))
 
-compileSelect :: Projection a b => Select a -> ExprBuilder
+compileSelect :: IsExpr b => Select b -> ExprBuilder
 compileSelect sel =
       withClause <> (plain "SELECT " `D.cons` proj) `D.snoc` plain " FROM "
       <> selectFrom sel <> whereClause
@@ -263,7 +281,7 @@ compileSelect sel =
     withClause = case selectWith sel of
       [] -> mempty
       ws -> plain "WITH " `D.cons` commaSep ws
-    proj = commaSep $ map getBuilder $ toProjection (selectExpr sel)
+    proj = commaSep $ map getBuilder $ compileProjection $ (selectExpr sel)
     whereClause = case selectWhere sel of
       Nothing -> mempty
       Just ex -> plain " WHERE " `D.cons` getBuilder ex
