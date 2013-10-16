@@ -18,9 +18,9 @@ module Database.PostgreSQL.Simple.Dsl.Entity
     , updateEntity
     , updateEntityReturning
     , insertEntity
+    , insertFieldsReturning
     ) where
 
-import           Control.Applicative
 import           Control.Monad                           (liftM, void)
 
 import           Blaze.ByteString.Builder.ByteString     as B
