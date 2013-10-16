@@ -3,9 +3,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies        #-}
 {-# LANGUAGE TypeOperators       #-}
-
 module Database.PostgreSQL.Simple.Dsl
-     ( select
+     (
+     -- * Example of usage
+     -- $use
+       select
      , formatQuery
      , fromTable
      , with
@@ -50,6 +52,96 @@ import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
 import qualified Database.PostgreSQL.Simple              as PG
 import           Database.PostgreSQL.Simple.Dsl.Internal
 import           Database.PostgreSQL.Simple.ToField
+
+-- $use
+--
+-- A bit of boilerplate is required
+--
+-- @
+--
+--      newtype UserId = UserId { getUserId :: Int}
+--                  deriving (Show, ToField, FromField, Eq, Ord)
+--
+--      data User = User { userId :: UserId
+--                 , userLogin :: String
+--                 , userPassword :: ByteString
+--                 } deriving (Show)
+--
+--      data Role = Role { roleUserId :: UserId, roleName :: ByteString }
+--                  deriving (Show)
+--
+--      data instance Field User t a where
+--        UserId'   :: Field User \"id\" UserId
+--        UserLogin :: Field User \"login\" String
+--        UserPass  :: Field User \"passwd\" ByteString
+--
+--      instance Table User where
+--        tableName _ = \"users\"
+--
+--      instance Selectable User where
+--        entityParser _ = User \<$> fromField UserId'
+--                              \<*> fromField UserLogin
+--                              \<*> fromField UserPass
+--
+--      instance Entity User where
+--        type EntityId User = UserId
+--        type EntityIdColumn User = \"id\"
+--
+--      data instance Field Role t a where
+--        RoleUserId :: Field Role \"user_id\" UserId
+--        RoleName   :: Field Role \"role\" ByteString
+--
+--      instance Table Role where
+--        tableName _ = \"roles\"
+--
+--      instance Selectable Role where
+--        entityParser _ = Role \<$> fromField RoleUserId
+--                              \<*> fromField RoleName
+--
+--
+--      getAllUsers :: Connection -> IO [Whole User]
+--      getAllUsers c = select c $ fromTable
+--
+--      allUsers :: Query (Whole User)
+--      allUsers = fromTable
+--
+--      allRoles :: Query (Whole Role)
+--      allRoles = fromTable
+-- @
+--
+--  This sql snippet maps to next code example
+--
+-- @
+--      SELECT roles.role, role.user_id
+--      FROM users
+--      INNER JOIN roles ON users.id = roles.user_id
+--      WHERE user.login = ?
+-- @
+--
+-- @
+--      userRoles :: String -> Query (ByteString, UserId)
+--      userRoles login =
+--        innerJoin (\\(usr :. rol) -> usr~>UserId' ==. rol~>RoleUserId)
+--                  -- ^ joining on user.id == roles.user_id
+--                  (allUsers & where_ (\u -> u~>UserLogin ==. val login))
+--                  -- ^ restrict to user with needed login
+--                  allRoles
+--                  -- ^ select all roles
+--        & project (\\(usr :. rol) -> (rol~>RoleName, rol~>RoleUserId))
+--          -- select only roles.role and role.user_id fields
+-- @
+--
+-- @
+--     SELECT users.*, roles.*
+--     FROM users, roles
+--     WHERE users.id = role.user_id
+-- @
+--
+-- @
+--      userRoles2 = crossJoin fromTable fromTable
+--                 & where_ (\\(u:.rol) -> u~>UserId' ==. rol~>RoleUserId)
+-- @
+--
 
 -- | Start query with table - SELECT table.*
 fromTable :: forall a . (Table a, Selectable a) => Query (Whole a)
