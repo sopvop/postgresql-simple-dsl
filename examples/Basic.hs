@@ -11,7 +11,6 @@ import Control.Applicative
 
 import Data.Proxy
 import Database.PostgreSQL.Simple.Dsl
-import Database.PostgreSQL.Simple.Dsl.Entity
 import Database.PostgreSQL.Simple           (Connection, connectPostgreSQL)
 import Database.PostgreSQL.Simple.FromField hiding (Field, fromField)
 import Database.PostgreSQL.Simple.FromRow
@@ -29,6 +28,7 @@ newtype UserId = UserId { getUserId :: Int}
 
 data User = User { userId :: UserId
                  , userLogin :: String
+                 , userCerebro :: String
                  , userPassword :: ByteString
                  } deriving (Show)
 
@@ -38,6 +38,7 @@ data Role = Role { roleUserId :: UserId, roleName :: ByteString }
 data instance Field User t a where
   UserId'   :: Field User "id" UserId
   UserLogin :: Field User "login" String
+  UserCerebroLogin :: Field User "cerebro_login" String
   UserPass  :: Field User "passwd" ByteString
 
 instance Table User where
@@ -46,6 +47,7 @@ instance Table User where
 instance Selectable User where
   entityParser _ = User <$> fromField UserId'
                         <*> fromField UserLogin
+                        <*> fromField UserCerebroLogin
                         <*> fromField UserPass
 
 data instance Field Role t a where
@@ -83,7 +85,7 @@ userRoles2 = crossJoin fromTable fromTable
            & where_ (\(u:.rol) -> u~>UserId' ==. rol~>RoleUserId)
 
 main = do
-  con <- connectPostgreSQL "dbname=testdb user=test password=batman"
+  con <- connectPostgreSQL "dbname=testdb user=lonokhov password=batman"
   formatQuery con (userRoles "foo" & finish)
   usrs <- select con (userRoles "oleg" & finish)
   mapM_ print usrs
@@ -94,4 +96,9 @@ main = do
                             & orderOn (\(name, _) -> descendOn name)
   print =<< formatQuery con qq
   print =<< select con qq
+  let uq = updateTable (\u-> u~>UserLogin ==. val "admin")
+                       (UserCerebroLogin =. val "22")
+                       & returningU (\u -> (u~>UserId', u~>UserCerebroLogin))
+  print =<< update con uq
+  print =<< formatUpdate con uq
 

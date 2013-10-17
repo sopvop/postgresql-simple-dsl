@@ -9,7 +9,9 @@
 
 
 module Database.PostgreSQL.Simple.Dsl.Entity
-    ( Entity(..)
+    (
+    {-
+     Entity(..)
     , Storable(..)
     , Update
     , (=.)
@@ -19,6 +21,7 @@ module Database.PostgreSQL.Simple.Dsl.Entity
     , updateEntityReturning
     , insertEntity
     , insertFieldsReturning
+    -}
     ) where
 
 import           Control.Monad                           (liftM, void)
@@ -47,16 +50,7 @@ class (Selectable a, Table a, ToField (EntityId a), FromField (EntityId a)) => E
 class (Entity a) => Storable a where
    entityUpdate :: a -> Update a
 
-newtype Update a = Update { getUpdater :: [(ByteString, Action)] }
-    deriving (Show, Monoid)
-
-infixr 7 =.
-(=.) :: forall v t a. (SingI t, ToField a) => Field v t a -> a -> Update v
-f =. a = Update [(fieldColumn f, toField a)]
-
-setField :: (SingI t, ToField a) => Field v t a -> a -> Update v
-setField f a = f =. a
-
+{-
 takeOne :: Monad m => [Whole a] -> m (Maybe a)
 takeOne [] = return Nothing
 takeOne (x:_) = return (Just $ getWhole x)
@@ -128,3 +122,4 @@ insertFieldsReturning c (Update upds) =
      (idcol, table) = getIdAndTable (undefined :: Proxy a)
      allColumns = makeColumnsAction . entityColumns $ entityParser (undefined :: Proxy a)
      toResult (Only a :. Whole b) = (a,b)
+-}

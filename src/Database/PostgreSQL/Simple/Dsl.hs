@@ -22,6 +22,14 @@ module Database.PostgreSQL.Simple.Dsl
      , descendOn
      , limitTo
      , offsetTo
+     , updateTable
+     , updateTableFrom
+     , update
+     , update_
+     , formatUpdate
+     , returningU
+     , (=.)
+     , setField
      , val
      , whole
      , only
@@ -45,6 +53,7 @@ module Database.PostgreSQL.Simple.Dsl
 import           Data.ByteString                         (ByteString)
 import qualified Data.ByteString.Char8                   as B
 import qualified Data.DList                              as D
+import           Data.Int                                (Int64)
 import           Data.List                               (intersperse)
 import           Data.Monoid
 import           Data.Proxy                              (Proxy)
@@ -314,3 +323,69 @@ whole (Expr a) = Expr a
 -- | Wrap in Only
 only :: Expr a -> Expr (Only a)
 only (Expr a) = Expr a
+
+
+updateTable :: forall a. (Table a) => (AsExpr (Whole a) -> Expr Bool)
+                     -> UpdExpr a -> Update (Whole a)
+updateTable f (UpdExpr upds) = Update $ do
+  nm <- grabName
+  let tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
+      expr = Expr nm :: Expr (Whole a)
+      Expr wher' = f expr
+  return $ Updating (mkSelector mempty expr) { selectWhere = Just $ wher' } upds tableE
+            UpdateMode
+  where
+    tn = tableName (undefined :: Proxy a)
+
+updateTableFrom :: forall a from. (Table a) => Select from
+                -> (AsExpr (from:. Whole a) -> Expr Bool)
+                -> (AsExpr from -> UpdExpr (from:.a)) -> Update (Whole a)
+updateTableFrom (Select mfrom) f fu = Update $ do
+  from' <- mfrom
+  nm <- grabName
+  let fromExpr = selectExpr from'
+      tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
+      expr = Expr nm :: Expr (Whole a)
+      Expr wher' = f (fromExpr :. expr)
+      UpdExpr upds = fu fromExpr
+      where'' = case selectWhere from' of
+        Nothing -> wher'
+        Just w -> RawExpr $ addParens w `D.snoc` plain " AND " <> addParens wher'
+  return $ Updating (from' { selectExpr = expr,
+                           selectWhere = Just $ where'' } ) upds tableE UpdateMode
+  where
+    tn = tableName (undefined :: Proxy a)
+
+insertIntoTable :: forall a . (Table a) => UpdExpr a -> Update (Whole a)
+insertIntoTable (UpdExpr upds) = Update $ do
+  nm <- grabName
+  let tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
+      expr = Expr nm :: Expr (Whole a)
+  return $ Updating (mkSelector mempty expr) upds tableE InsertMode
+  where
+    tn = tableName (undefined :: Proxy a)
+
+
+returningU :: (AsExpr a -> AsExpr b) -> Update a -> Update b
+returningU f (Update mu) = Update $ do
+  u <- mu
+  let sel = updatingSelect u
+      exprs = selectExpr sel
+  return $ u { updatingSelect = sel { selectExpr = f exprs } }
+
+update :: (FromRow r, IsExpr r) => Connection -> Update r -> IO [r]
+update c q = query c "?" (Only $ finishUpdate q)
+
+update_ :: IsExpr r => Connection -> Update r -> IO Int64
+update_ c q = PG.execute c "?" (Only $ finishUpdateNoRet q)
+
+
+formatUpdate :: IsExpr a => Connection -> Update a -> IO ByteString
+formatUpdate c q = PG.formatQuery c "?" (Only $ finishUpdate q)
+
+infixr 7 =.
+(=.) :: forall v t a. (SingI t, ToField a) => Field v t a -> Expr a -> UpdExpr v
+f =. (Expr a) = UpdExpr [(fieldColumn f, a)]
+
+setField :: forall v t a. (SingI t, ToField a) => Field v t a -> Expr a -> UpdExpr v
+setField f a = f =. a

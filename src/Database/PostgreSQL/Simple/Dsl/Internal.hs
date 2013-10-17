@@ -272,8 +272,9 @@ finishSelect (Select mq) = Many . D.toList . fst . fst $
     sel <- mq
     compileSelector sel nm
 
-compileSelector :: IsExpr a => Selector a -> RawExpr -> Namer (ExprBuilder, AsExpr a)
-compileSelector sel nm = do
+prepareSelector :: (IsExpr a) => Selector a -> RawExpr ->
+                Namer (ExprBuilder, ExprBuilder, ExprBuilder, ExprBuilder, AsExpr a)
+prepareSelector sel nm = do
   (projExprs, access) <- makeSubRename nm $ selectExpr sel
   let withClause = case selectWith sel of
         [] -> mempty
@@ -282,10 +283,14 @@ compileSelector sel nm = do
       whereClause = case selectWhere sel of
         Nothing -> mempty
         Just ex -> plain " WHERE " `D.cons` getBuilder ex
-      result = withClause <> (plain "SELECT " `D.cons` proj) `D.snoc` plain " FROM "
-               <> selectFrom sel <> whereClause
+  return (withClause, selectFrom sel, whereClause, proj, access)
 
-  return (result, access)
+
+compileSelector :: IsExpr a => Selector a -> RawExpr -> Namer (ExprBuilder, AsExpr a)
+compileSelector sel nm = do
+  (with, from, where', project, access) <- prepareSelector sel nm
+  return (with <> (plain "SELECT " `D.cons` project) `D.snoc` plain " FROM "
+               <> from <> where', access)
 
 data Finishing a = Finishing
   { finishingSelect :: ExprBuilder
@@ -332,4 +337,45 @@ compileSorting :: Sorting -> ExprBuilder
 compileSorting (Asc r) = getBuilder r `D.snoc` plain " ASC "
 compileSorting (Desc r) = getBuilder r `D.snoc` plain " DESC "
 
+data UpdateMode = InsertMode | UpdateMode | DeleteMode
+     deriving (Show, Eq, Ord)
+
+data Updating a = Updating
+  { updatingSelect :: Selector a
+  , updatingSet    :: [(ByteString, RawExpr)]
+  , updatingTable  :: ExprBuilder
+  , updatingMode   :: UpdateMode
+  }
+
+newtype Update a = Update { runUpdate :: State NameSource (Updating a) }
+
+compileUpdate :: IsExpr a => Update a -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
+compileUpdate (Update mupd) = do
+  upd <- mupd
+  nm <- grabName
+  (with, from, where', project, access) <- prepareSelector (updatingSelect upd) nm
+  let setClause = commaSep . map mkUpd $ updatingSet upd
+      updTable = (plain " UPDATE " `D.cons` updatingTable upd) `D.snoc` plain " SET "
+      ret = case D.toList project of
+        [] -> mempty
+        xs -> D.fromList (plain " RETURNING " : xs)
+      from' = case D.toList from of
+        [] -> mempty
+        xs -> D.fromList (plain " FROM " :xs)
+  return $ (with <> updTable <> setClause <> from' <> where', ret, access)
+  where
+    mkUpd (bs, act) = D.cons (Plain $ B.fromByteString bs <> B.fromByteString "=")
+                       (getBuilder act)
+
+finishUpdate :: (IsExpr a) => Update a -> Action
+finishUpdate q = Many . D.toList $ upd <> ret
+  where (upd, ret, _) = fst $  runState (compileUpdate q) (NameSource 0)
+
+finishUpdateNoRet q = Many . D.toList $ upd
+  where (upd, _, _) = fst $  runState (compileUpdate q) (NameSource 0)
+
+newtype UpdExpr a = UpdExpr { getUpdates :: [(ByteString, RawExpr)] }
+instance Monoid (UpdExpr a) where
+  mempty = UpdExpr mempty
+  UpdExpr a `mappend` UpdExpr b = UpdExpr (a<>b)
 
