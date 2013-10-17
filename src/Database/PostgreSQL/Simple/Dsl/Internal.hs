@@ -114,6 +114,10 @@ mkAnd a b = RawExpr $ addParens a `D.append` (plain " AND " `D.cons` addParens b
 mkAccess :: RawExpr -> RawExpr -> DList Action
 mkAccess a b = D.append (addParens a) (plain "." `D.cons` (addParens b))
 
+commaSep :: [ExprBuilder] -> ExprBuilder
+commaSep = D.concat . intersperse (D.singleton . Plain $ B.fromChar ',')
+
+type Namer a = State NameSource a
 
 data GroupByExpr = GroupByExpr
      { groupByCols    :: [RawExpr]
@@ -131,24 +135,22 @@ instance Monoid GroupByExpr where
           Nothing -> Just ah'
           Just bh' -> Just $ mkAnd ah' bh'
 
-data Select a = Select { selectFrom   :: ExprBuilder
-                       , selectWith   :: [D.DList Action]
-                       , selectWhere  :: Maybe RawExpr
-                       , selectGroup  :: Maybe GroupByExpr
-                       , selectOrder  :: Maybe ExprBuilder
-                       , selectLimit  :: Maybe Int
-                       , selectOffset :: Maybe Int
-                       , selectExpr   :: (AsExpr a)
-                       }
+data Selector a = Selector { selectFrom  :: ExprBuilder
+                           , selectWith  :: [ExprBuilder]
+                           , selectWhere :: Maybe RawExpr
+                           , selectExpr  :: AsExpr a
+                           }
 
-mkSelect :: ExprBuilder -> (AsExpr a) -> Select a
-mkSelect c a = Select c [] Nothing Nothing Nothing Nothing Nothing a
+mkSelector :: ExprBuilder -> (AsExpr a) -> Selector a
+mkSelector c a = Selector c [] Nothing a
 
 -- | Source of uniques
 newtype NameSource = NameSource { getNameSource :: Int }
 
--- | Selection query
-newtype Query a = Query { runQuery :: State NameSource (Select a) }
+-- | Select query
+newtype Select a = Select { runSelect :: State NameSource (Selector a) }
+
+newtype Query a = Query { runQuery :: State NameSource (Finishing a) }
 
 -- | Get a unique name
 grabName :: State NameSource RawExpr
@@ -263,44 +265,71 @@ mkRename :: RawExpr -> RawExpr -> Expr a
 mkRename a nm = binOp (plain " AS ") a nm
 
 
-finishSelect :: IsExpr a => Query a -> Action
-finishSelect (Query q) = Many . D.toList $ compileSelect $ fst (runState q (NameSource 0))
+finishSelect :: IsExpr a => Select a -> Action
+finishSelect (Select mq) = Many . D.toList . fst . fst $
+  flip runState (NameSource 0) $ do
+    nm <- grabName
+    sel <- mq
+    compileSelector sel nm
 
-compileSelect :: IsExpr b => Select b -> ExprBuilder
-compileSelect sel =
-      withClause <> (plain "SELECT " `D.cons` proj) `D.snoc` plain " FROM "
-      <> selectFrom sel <> whereClause
-      <> groupByClause <> orderClause <> offsetClause <> limitClause
-  where
-    withClause = case selectWith sel of
-      [] -> mempty
-      ws -> plain "WITH " `D.cons` commaSep ws
-    proj = commaSep $ map getBuilder $ compileProjection $ (selectExpr sel)
-    whereClause = case selectWhere sel of
-      Nothing -> mempty
-      Just ex -> plain " WHERE " `D.cons` getBuilder ex
-    groupByClause = case selectGroup sel of
-      Nothing -> mempty
-      Just (GroupByExpr [] _) -> mempty
-      Just (GroupByExpr cls havs) ->
-        plain " GROUP BY " `D.cons` commaSep (map getBuilder cls)
-        <> case havs of
-           Nothing -> mempty
-           Just havs' -> plain " HAVING " `D.cons` getBuilder havs'
-    commaSep = D.concat . intersperse (D.singleton . Plain $ B.fromChar ',')
-    orderClause = case selectOrder sel of
-      Nothing -> mempty
-      Just sorts -> plain " ORDER BY " `D.cons` sorts
-    offsetClause = case selectOffset sel of
-      Nothing -> mempty
-      Just off -> D.fromList [plain " OFFSET ", Plain $ B.fromShow off]
-    limitClause = case selectLimit sel of
-      Nothing -> mempty
-      Just lim -> D.fromList [plain " LIMIT ", Plain $ B.fromShow lim]
+compileSelector :: IsExpr a => Selector a -> RawExpr -> Namer (ExprBuilder, AsExpr a)
+compileSelector sel nm = do
+  (projExprs, access) <- makeSubRename nm $ selectExpr sel
+  let withClause = case selectWith sel of
+        [] -> mempty
+        ws -> plain "WITH " `D.cons` commaSep ws
+      proj = commaSep $ map getBuilder $ compileProjection projExprs
+      whereClause = case selectWhere sel of
+        Nothing -> mempty
+        Just ex -> plain " WHERE " `D.cons` getBuilder ex
+      result = withClause <> (plain "SELECT " `D.cons` proj) `D.snoc` plain " FROM "
+               <> selectFrom sel <> whereClause
 
+  return (result, access)
+
+data Finishing a = Finishing
+  { finishingSelect :: ExprBuilder
+  , finishingGroup  :: Maybe (AsExpr a -> ExprBuilder)
+  , finishingHaving :: Maybe (AsExpr a -> ExprBuilder)
+  , finishingOrder  :: Maybe (AsExpr a -> ExprBuilder)
+  , finishingLimit  :: Maybe Int
+  , finishingOffset :: Maybe Int
+  , finishingExpr   :: AsExpr a
+  }
+
+mkFinishing :: ExprBuilder -> AsExpr a -> Finishing a
+mkFinishing bld a = Finishing bld Nothing Nothing Nothing Nothing Nothing a
+
+finishQuery :: (IsExpr a) =>  Query a -> Action
+finishQuery (Query q) = Many . D.toList . fst  $
+             runState (compileFinishing q) (NameSource 0)
+
+compileFinishing :: IsExpr a => Namer (Finishing a) -> Namer (ExprBuilder)
+compileFinishing mfin = do
+  fin <- mfin
+  let exprs = finishingExpr fin
+      groupByClause = case finishingGroup fin of
+        Nothing -> mempty
+        Just order ->
+          plain " GROUP BY " `D.cons` order exprs
+          <> case finishingHaving fin of
+             Nothing -> mempty
+             Just havs -> plain " HAVING " `D.cons` havs exprs
+      orderClause = case finishingOrder fin of
+        Nothing -> mempty
+        Just sorts -> plain " ORDER BY " `D.cons` sorts exprs
+      offsetClause = case finishingOffset fin of
+        Nothing -> mempty
+        Just off -> D.fromList [plain " OFFSET ", Plain $ B.fromShow off]
+      limitClause = case finishingLimit fin of
+        Nothing -> mempty
+        Just lim -> D.fromList [plain " LIMIT ", Plain $ B.fromShow lim]
+  return $ finishingSelect fin <> orderClause <> groupByClause <> offsetClause <> limitClause
 
 data Sorting = Asc RawExpr | Desc RawExpr
 
 compileSorting :: Sorting -> ExprBuilder
 compileSorting (Asc r) = getBuilder r `D.snoc` plain " ASC "
 compileSorting (Desc r) = getBuilder r `D.snoc` plain " DESC "
+
+

@@ -48,10 +48,6 @@ instance Selectable User where
                         <*> fromField UserLogin
                         <*> fromField UserPass
 
-instance Entity User where
-  type EntityId User = UserId
-  type EntityIdColumn User = "id"
-
 data instance Field Role t a where
   RoleUserId :: Field Role "user_id" UserId
   RoleName   :: Field Role "role" ByteString
@@ -67,16 +63,16 @@ instance FromRow Role where
   fromRow = entityRowParser $ entityParser (undefined :: Proxy Role)
 
 getAllUsers :: Connection -> IO [Whole User]
-getAllUsers c = select c $ fromTable
+getAllUsers c = select c $ fromTable & finish
 
-allUsers :: Query (Whole User)
+allUsers :: Select (Whole User)
 allUsers = fromTable
 
-allRoles :: Query (Whole Role)
+allRoles :: Select (Whole Role)
 allRoles = fromTable
 
 -- | all roles for login
-userRoles :: String -> Query (ByteString, UserId)
+userRoles :: String -> Select (ByteString, UserId)
 userRoles login =
   innerJoin (\(usr :. rol) -> usr ~> UserId' ==. rol ~> RoleUserId)
             (allUsers & where_ (\u -> u~>UserLogin ==. val login))
@@ -88,12 +84,14 @@ userRoles2 = crossJoin fromTable fromTable
 
 main = do
   con <- connectPostgreSQL "dbname=testdb user=test password=batman"
-  formatQuery con (userRoles "foo")
-  usrs <- select con (userRoles "oleg")
+  formatQuery con (userRoles "foo" & finish)
+  usrs <- select con (userRoles "oleg" & finish)
   mapM_ print usrs
   let q = userRoles2 & where_ (\(u:._)->u~>UserId' ==. val (UserId 2))
-  mapM_ print =<< select con q
-  print =<< formatQuery con q
-  print =<< formatQuery con (crossJoin q $ userRoles "a")
-  print =<< select con (crossJoin q $ userRoles "a")
+  mapM_ print =<< select con (finish q)
+  print =<< formatQuery con (finish q)
+  let qq = userRoles "oleg" & finish
+                            & orderOn (\(name, _) -> descendOn name)
+  print =<< formatQuery con qq
+  print =<< select con qq
 

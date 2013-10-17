@@ -8,6 +8,7 @@ module Database.PostgreSQL.Simple.Dsl
      -- * Example of usage
      -- $use
        select
+     , finish
      , formatQuery
      , fromTable
      , with
@@ -17,6 +18,8 @@ module Database.PostgreSQL.Simple.Dsl
      , project
      , orderBy
      , orderOn
+     , ascendOn
+     , descendOn
      , limitTo
      , offsetTo
      , val
@@ -25,6 +28,7 @@ module Database.PostgreSQL.Simple.Dsl
      , Whole
      , Only(..)
      , (:.)(..)
+     , Select
      , Query
      , Expr
      , (==.), (<.), (<=.), (>.), (>=.), (||.), (&&.), (~>)
@@ -102,10 +106,10 @@ import           Database.PostgreSQL.Simple.ToField
 --      getAllUsers :: Connection -> IO [Whole User]
 --      getAllUsers c = select c $ fromTable
 --
---      allUsers :: Query (Whole User)
+--      allUsers :: Select (Whole User)
 --      allUsers = fromTable
 --
---      allRoles :: Query (Whole Role)
+--      allRoles :: Select (Whole Role)
 --      allRoles = fromTable
 -- @
 --
@@ -119,7 +123,7 @@ import           Database.PostgreSQL.Simple.ToField
 -- @
 --
 -- @
---      userRoles :: String -> Query (ByteString, UserId)
+--      userRoles :: String -> Select (ByteString, UserId)
 --      userRoles login =
 --        innerJoin (\\(usr :. rol) -> usr~>UserId' ==. rol~>RoleUserId)
 --                  -- ^ joining on user.id == roles.user_id
@@ -144,35 +148,34 @@ import           Database.PostgreSQL.Simple.ToField
 --
 
 -- | Start query with table - SELECT table.*
-fromTable :: forall a . (Table a, Selectable a) => Query (Whole a)
-fromTable = Query $ do
+fromTable :: forall a . (Table a, Selectable a) => Select (Whole a)
+fromTable = Select $ do
   nm <- grabName
   let fromWhat = plain (B.append tn " AS ") `D.cons` getBuilder nm
       expr = Expr nm :: Expr (Whole a)
-  return $ mkSelect fromWhat expr
+  return $ mkSelector fromWhat expr
   where
     tn = tableName (undefined :: Proxy a)
 
 -- | Adds non recursive WITH query
-with :: (IsExpr with, IsExpr a) => Query with -> Query a -> Query (a :. with)
-with (Query w) (Query s) = Query $ do
+with :: (IsExpr with, IsExpr a) => Select with -> Select a -> Select (a :. with)
+with (Select mw) (Select s) = Select $ do
   nm <- grabName
-  wq <- w
-  (subRenames, subSelect) <- makeSubRename nm $ selectExpr wq
+  w <- mw
+  (compiled, subSelect) <- compileSelector w nm
   sq <- s
   let nameBld = getBuilder nm
       withAct = (nameBld `D.snoc` plain " AS (")
-                `D.append` compileSelect wq { selectExpr = subRenames } `D.snoc` plain ") "
+                `D.append` compiled `D.snoc` plain ") "
       newExpr = selectExpr sq :. subSelect
   return ( sq { selectWith = selectWith sq ++ [withAct]
               , selectExpr = newExpr
               , selectFrom = (selectFrom sq `D.snoc` plain ",") `D.append` nameBld } )
 
 -- | Inner join on bool expression. Joins 'WHERE' clauses using AND
---   drops ORDER BY, LIMIT, OFFSET.
-innerJoin :: (AsExpr a :. AsExpr b -> Expr Bool) -> Query a -> Query b
-         -> Query (a :. b)
-innerJoin f (Query left) (Query right) = Query $ do
+innerJoin :: (AsExpr a :. AsExpr b -> Expr Bool) -> Select a -> Select b
+         -> Select (a :. b)
+innerJoin f (Select left) (Select right) = Select $ do
   leftq  <- left
   rightq <- right
   let lexp = selectExpr leftq
@@ -186,11 +189,11 @@ innerJoin f (Query left) (Query right) = Query $ do
         Just ex -> case selectWhere leftq of
           Nothing -> Just ex
           Just ex' -> Just (mkAnd ex ex')
-  return $ (mkSelect fromClause (lexp :. rexp) ) { selectWhere = whereClause }
+  return $ (mkSelector fromClause (lexp :. rexp) ) { selectWhere = whereClause }
 
 -- | Do a cross join, SELECT .. FROM a,b
-crossJoin :: Query a -> Query b -> Query (a :. b)
-crossJoin (Query left) (Query right) = Query $ do
+crossJoin :: Select a -> Select b -> Select (a :. b)
+crossJoin (Select left) (Select right) = Select $ do
   leftq  <- left
   rightq <- right
   let lexp = selectExpr leftq
@@ -202,11 +205,11 @@ crossJoin (Query left) (Query right) = Query $ do
         Just ex -> case selectWhere leftq of
           Nothing -> Just ex
           Just ex' -> Just (mkAnd ex ex')
-  return $ (mkSelect fromClause (lexp :. rexp) ) { selectWhere = whereClause }
+  return $ (mkSelector fromClause (lexp :. rexp) ) { selectWhere = whereClause }
 
 -- | Append expression to WHERE clause
-where_ :: (AsExpr a -> Expr Bool) -> Query a -> Query a
-where_ f (Query mq) = Query $ do
+where_ :: (AsExpr a -> Expr Bool) -> Select a -> Select a
+where_ f (Select mq) = Select $ do
     q <- mq
     let Expr extra = f (selectExpr q)
         newSel = case selectWhere q of
@@ -218,45 +221,58 @@ where_ f (Query mq) = Query $ do
 orderBy :: (AsExpr a -> [Sorting]) -> Query a -> Query a
 orderBy f (Query mq) = Query $ do
   q <- mq
-  let sort = Just . D.concat . intersperse (D.singleton $ plain ",")
-                             . map compileSorting $ f (selectExpr q)
-  return q { selectOrder = selectOrder q <> sort }
+  let sort = D.concat . intersperse (D.singleton $ plain ",")
+                      . map compileSorting . f
+  return q { finishingOrder = Just sort }
 
 -- | append to ORDER BY clase
 orderOn :: (AsExpr a -> Sorting) -> Query a -> Query a
 orderOn f (Query mq) = Query $ do
   q <- mq
-  let start = case selectOrder q of
-                 Nothing -> mempty
-                 Just order -> order `D.snoc` plain ","
-      sort = Just $ start `D.append` compileSorting (f $ selectExpr q)
-  return q { selectOrder = selectOrder q <> sort }
+  let compiled = compileSorting . f
+      sort = case finishingOrder q of
+                 Nothing -> compiled
+                 Just _ -> fmap (`D.snoc` plain ",") compiled
+  return q { finishingOrder = finishingOrder q <> Just sort }
+
+ascendOn :: (Expr a) -> Sorting
+ascendOn (Expr a) = Asc a
+
+descendOn :: Expr t -> Sorting
+descendOn (Expr a) = Desc a
 
 -- | set LIMIT
 limitTo :: Int -> Query a -> Query a
 limitTo i (Query mq) = Query $ do
   q <- mq
-  return $ q { selectLimit = Just i }
+  return $ q { finishingLimit = Just i }
 
 -- | set OFFSET
 offsetTo :: Int -> Query a -> Query a
 offsetTo i (Query mq) = Query $ do
   q <- mq
-  return $ q { selectOffset = Just i }
+  return $ q { finishingOffset = Just i }
 
 -- | Select only subset of data
-project :: (AsExpr a -> AsExpr b) -> Query a -> Query b
-project f (Query mq) = Query $ do
+project :: (AsExpr a -> AsExpr b) -> Select a -> Select b
+project f (Select mq) = Select $ do
     q <- mq
     let newExpr = f (selectExpr q)
-    return $ q { selectExpr = newExpr}
+    return $ q { selectExpr = newExpr }
+
+finish :: IsExpr a => Select a -> Query a
+finish (Select mselector) = Query $ do
+  selector <- mselector
+  let exprs = selectExpr selector
+  (bld, _) <- compileSelector selector =<< grabName
+  return $ mkFinishing bld exprs
 
 -- | Execute query
 select :: (IsExpr a, FromRow a) => Connection -> Query a -> IO [a]
-select c q = query c "?" (Only $ finishSelect q)
+select c q = query c "?" (Only $ finishQuery q)
 
 formatQuery :: IsExpr a => Connection -> Query a -> IO ByteString
-formatQuery c q = PG.formatQuery c "?" (Only $ finishSelect q)
+formatQuery c q = PG.formatQuery c "?" (Only $ finishQuery q)
 
 -- | lift value to Expr
 val :: (ToField a ) => a -> Expr a
