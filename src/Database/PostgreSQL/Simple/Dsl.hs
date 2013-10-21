@@ -22,9 +22,13 @@ module Database.PostgreSQL.Simple.Dsl
      , descendOn
      , limitTo
      , offsetTo
-     , updateTable
-     , updateTableFrom
      , update
+     , updateFrom
+     , insert
+     , insertFrom
+     , delete
+     , deleteFrom
+     , executeUpdate
      , update_
      , formatUpdate
      , returningU
@@ -325,22 +329,22 @@ only :: Expr a -> Expr (Only a)
 only (Expr a) = Expr a
 
 
-updateTable :: forall a. (Table a) => (AsExpr (Whole a) -> Expr Bool)
+update :: forall a. (Table a) => (AsExpr (Whole a) -> Expr Bool)
                      -> UpdExpr a -> Update (Whole a)
-updateTable f (UpdExpr upds) = Update $ do
+update f (UpdExpr upds) = Update $ do
   nm <- grabName
   let tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
       expr = Expr nm :: Expr (Whole a)
       Expr wher' = f expr
-  return $ Updating (mkSelector mempty expr) { selectWhere = Just $ wher' } upds tableE
-            UpdateMode
+  return $ Updating (mkSelector mempty expr) { selectWhere = Just $ wher' }
+         (DoUpdate upds) tableE
   where
     tn = tableName (undefined :: Proxy a)
 
-updateTableFrom :: forall a from. (Table a) => Select from
+updateFrom :: forall a from. (Table a) => Select from
                 -> (AsExpr (from:. Whole a) -> Expr Bool)
-                -> (AsExpr from -> UpdExpr (from:.a)) -> Update (Whole a)
-updateTableFrom (Select mfrom) f fu = Update $ do
+                -> (AsExpr from -> UpdExpr a) -> Update (Whole a)
+updateFrom (Select mfrom) f fu = Update $ do
   from' <- mfrom
   nm <- grabName
   let fromExpr = selectExpr from'
@@ -352,16 +356,58 @@ updateTableFrom (Select mfrom) f fu = Update $ do
         Nothing -> wher'
         Just w -> RawExpr $ addParens w `D.snoc` plain " AND " <> addParens wher'
   return $ Updating (from' { selectExpr = expr,
-                           selectWhere = Just $ where'' } ) upds tableE UpdateMode
+                           selectWhere = Just $ where'' } ) (DoUpdate upds) tableE
   where
     tn = tableName (undefined :: Proxy a)
 
-insertIntoTable :: forall a . (Table a) => UpdExpr a -> Update (Whole a)
-insertIntoTable (UpdExpr upds) = Update $ do
+insert :: forall a . (Table a) => UpdExpr a -> Update (Whole a)
+insert (UpdExpr upds) = Update $ do
+  let tableE = D.singleton $ plain tn
+      expr = Expr (RawTerm $ tableE) :: Expr (Whole a)
+  return $ Updating (mkSelector mempty expr) (DoInsert upds) tableE
+  where
+    tn = tableName (undefined :: Proxy a)
+
+insertFrom :: forall a from. (Table a) => Select from
+           -> (AsExpr from -> UpdExpr a) -> Update (Whole a)
+insertFrom (Select mfrom) fu = Update $ do
+  from' <- mfrom
+  let tableE = D.singleton $ plain tn
+      expr = Expr (RawTerm $ tableE) :: Expr (Whole a)
+      fromExpr = selectExpr from'
+      UpdExpr upds = fu fromExpr
+  return $ Updating (from' { selectExpr = expr } ) (DoInsert upds) tableE
+  where
+    tn = tableName (undefined :: Proxy a)
+
+
+delete :: forall a. (Table a) => (AsExpr (Whole a) -> Expr Bool)
+                    -> Update (Whole a)
+delete f = Update $ do
   nm <- grabName
-  let tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
+  let tableE = D.singleton $ plain tn
       expr = Expr nm :: Expr (Whole a)
-  return $ Updating (mkSelector mempty expr) upds tableE InsertMode
+      Expr wher' = f expr
+  return $ Updating (mkSelector mempty expr) { selectWhere = Just $ wher' }
+         DoDelete tableE
+  where
+    tn = tableName (undefined :: Proxy a)
+
+deleteFrom :: forall a from. (Table a) => Select from
+                -> (AsExpr (from:. Whole a) -> Expr Bool)
+                -> Update (Whole a)
+deleteFrom (Select mfrom) f = Update $ do
+  from' <- mfrom
+  nm <- grabName
+  let fromExpr = selectExpr from'
+      tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
+      expr = Expr nm :: Expr (Whole a)
+      Expr wher' = f (fromExpr :. expr)
+      where'' = case selectWhere from' of
+        Nothing -> wher'
+        Just w -> RawExpr $ addParens w `D.snoc` plain " AND " <> addParens wher'
+  return $ Updating (from' { selectExpr = expr,
+                           selectWhere = Just $ where'' } ) (DoDelete) tableE
   where
     tn = tableName (undefined :: Proxy a)
 
@@ -373,8 +419,8 @@ returningU f (Update mu) = Update $ do
       exprs = selectExpr sel
   return $ u { updatingSelect = sel { selectExpr = f exprs } }
 
-update :: (FromRow r, IsExpr r) => Connection -> Update r -> IO [r]
-update c q = query c "?" (Only $ finishUpdate q)
+executeUpdate :: (FromRow r, IsExpr r) => Connection -> Update r -> IO [r]
+executeUpdate c q = query c "?" (Only $ finishUpdate q)
 
 update_ :: IsExpr r => Connection -> Update r -> IO Int64
 update_ c q = PG.execute c "?" (Only $ finishUpdateNoRet q)

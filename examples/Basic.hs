@@ -9,9 +9,10 @@ import Data.ByteString (ByteString)
 
 import Control.Applicative
 
+import Data.Monoid
 import Data.Proxy
-import Database.PostgreSQL.Simple.Dsl
 import Database.PostgreSQL.Simple           (Connection, connectPostgreSQL)
+import Database.PostgreSQL.Simple.Dsl
 import Database.PostgreSQL.Simple.FromField hiding (Field, fromField)
 import Database.PostgreSQL.Simple.FromRow
 import Database.PostgreSQL.Simple.ToField
@@ -96,9 +97,19 @@ main = do
                             & orderOn (\(name, _) -> descendOn name)
   print =<< formatQuery con qq
   print =<< select con qq
-  let uq = updateTable (\u-> u~>UserLogin ==. val "admin")
-                       (UserCerebroLogin =. val "22")
-                       & returningU (\u -> (u~>UserId', u~>UserCerebroLogin))
-  print =<< update con uq
+  let uq = update (\u-> u~>UserLogin ==. val "admin")
+                    (UserCerebroLogin =. val "22")
+                   & returningU (\u -> (u~>UserId', u~>UserCerebroLogin))
+  print =<< executeUpdate con uq
   print =<< formatUpdate con uq
-
+  let ins = insert (UserLogin =. val "foo")
+  print =<< formatUpdate con ins
+  let ins2 = insertFrom (fromTable & where_ (\u->u~>UserLogin ==. val "admin"))
+             (\u -> UserLogin =. val "foo" <> UserPass =. u~>UserPass)
+  print =<< formatUpdate con ins2
+  let del1 = delete (\u-> u~>UserLogin ==. val "foo")
+  print =<< formatUpdate con del1
+  let del2 = deleteFrom (fromTable & where_ (\u->u~>UserLogin ==. val "admin"))
+            (\(ut:.u) -> u~>UserLogin ==. val "foo" &&. u~>UserPass ==. ut~>UserPass)
+  print =<< formatUpdate con del2
+  print =<< executeUpdate con del2

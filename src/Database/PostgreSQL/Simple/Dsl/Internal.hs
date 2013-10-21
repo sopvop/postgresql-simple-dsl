@@ -337,25 +337,27 @@ compileSorting :: Sorting -> ExprBuilder
 compileSorting (Asc r) = getBuilder r `D.snoc` plain " ASC "
 compileSorting (Desc r) = getBuilder r `D.snoc` plain " DESC "
 
-data UpdateMode = InsertMode | UpdateMode | DeleteMode
-     deriving (Show, Eq, Ord)
+data UpdatingAct = DoUpdate [(ByteString, RawExpr)]
+                 | DoInsert [(ByteString, RawExpr)]
+                 | DoInsertMany [ByteString] [RawExpr]
+                 | DoDelete
 
 data Updating a = Updating
   { updatingSelect :: Selector a
-  , updatingSet    :: [(ByteString, RawExpr)]
+  , updatingAct    :: UpdatingAct
   , updatingTable  :: ExprBuilder
-  , updatingMode   :: UpdateMode
   }
 
 newtype Update a = Update { runUpdate :: State NameSource (Updating a) }
 
-compileUpdate :: IsExpr a => Update a -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
-compileUpdate (Update mupd) = do
-  upd <- mupd
+
+compileUpdateAct :: IsExpr a => Selector a -> [(ByteString, RawExpr)] -> ExprBuilder
+              -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
+compileUpdateAct sel upd tbl = do
   nm <- grabName
-  (with, from, where', project, access) <- prepareSelector (updatingSelect upd) nm
-  let setClause = commaSep . map mkUpd $ updatingSet upd
-      updTable = (plain " UPDATE " `D.cons` updatingTable upd) `D.snoc` plain " SET "
+  (with, from, where', project, access) <- prepareSelector sel nm
+  let setClause = commaSep $ map mkUpd upd
+      updTable = (plain " UPDATE " `D.cons` tbl) `D.snoc` plain " SET "
       ret = case D.toList project of
         [] -> mempty
         xs -> D.fromList (plain " RETURNING " : xs)
@@ -366,6 +368,46 @@ compileUpdate (Update mupd) = do
   where
     mkUpd (bs, act) = D.cons (Plain $ B.fromByteString bs <> B.fromByteString "=")
                        (getBuilder act)
+
+compileInsertAct :: IsExpr a => Selector a -> [(ByteString, RawExpr)] -> ExprBuilder
+              -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
+compileInsertAct sel upd tbl = do
+  nm <- grabName
+  (with, from, where', project, access) <- prepareSelector sel nm
+  let cols = commaSep $ map (D.singleton.plain.fst) upd
+      vals = commaSep $ map (getBuilder.snd) upd
+      updTable = (plain " INSERT INTO " `D.cons` tbl) `D.snoc` plain "("
+               <> cols `D.snoc` plain ") SELECT " <> vals `D.snoc` plain ""
+      ret = case D.toList project of
+        [] -> mempty
+        xs -> D.fromList (plain " RETURNING " : xs)
+      from' = case D.toList from of
+        [] -> mempty
+        xs -> D.fromList (plain " FROM " :xs)
+  return $ (with <> updTable <> from' <> where', ret, access)
+
+compileDeleteAct :: IsExpr a => Selector a -> ExprBuilder
+              -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
+compileDeleteAct sel tbl = do
+  nm <- grabName
+  (with, from, where', project, access) <- prepareSelector sel nm
+  let updTable = (plain " DELETE FROM " `D.cons` tbl)
+      ret = case D.toList project of
+        [] -> mempty
+        xs -> D.fromList (plain " RETURNING " : xs)
+      from' = case D.toList from of
+        [] -> mempty
+        xs -> D.fromList (plain " USING " :xs)
+  return $ (with <> updTable <> from' <> where', ret, access)
+
+
+compileUpdate :: IsExpr a => Update a -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
+compileUpdate (Update mupd) = do
+  upd <- mupd
+  case updatingAct upd of
+     DoUpdate ups -> compileUpdateAct (updatingSelect upd) ups (updatingTable upd)
+     DoInsert ups -> compileInsertAct (updatingSelect upd) ups (updatingTable upd)
+     DoDelete -> compileDeleteAct (updatingSelect upd) (updatingTable upd)
 
 finishUpdate :: (IsExpr a) => Update a -> Action
 finishUpdate q = Many . D.toList $ upd <> ret
