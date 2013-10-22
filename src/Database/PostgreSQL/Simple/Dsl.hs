@@ -176,7 +176,7 @@ fromTable = Select $ do
       expr = Expr nm :: Expr (Whole a)
   return $ mkSelector fromWhat expr
   where
-    tn = tableName (undefined :: Proxy a)
+    tn = tableName (Proxy :: Proxy a)
 
 -- | Adds non recursive WITH query
 with :: (IsExpr with, IsExpr a) => Select with -> Select a -> Select (a :. with)
@@ -348,7 +348,7 @@ update f (UpdExpr upds) = Update $ do
   return $ Updating (mkSelector mempty expr) { selectWhere = Just $ wher' }
          (DoUpdate upds) tableE
   where
-    tn = tableName (undefined :: Proxy a)
+    tn = tableName (Proxy :: Proxy a)
 
 updateFrom :: forall a from. (Table a) => Select from
                 -> (AsExpr (from:. Whole a) -> Expr Bool)
@@ -367,7 +367,7 @@ updateFrom (Select mfrom) f fu = Update $ do
   return $ Updating (from' { selectExpr = expr,
                            selectWhere = Just $ where'' } ) (DoUpdate upds) tableE
   where
-    tn = tableName (undefined :: Proxy a)
+    tn = tableName (Proxy :: Proxy a)
 
 insert :: forall a . (Table a) => UpdExpr a -> Update (Whole a)
 insert (UpdExpr upds) = Update $ do
@@ -375,7 +375,7 @@ insert (UpdExpr upds) = Update $ do
       expr = Expr (RawTerm $ tableE) :: Expr (Whole a)
   return $ Updating (mkSelector mempty expr) (DoInsert upds) tableE
   where
-    tn = tableName (undefined :: Proxy a)
+    tn = tableName (Proxy :: Proxy a)
 
 insertFrom :: forall a from. (Table a) => Select from
            -> (AsExpr from -> UpdExpr a) -> Update (Whole a)
@@ -387,7 +387,7 @@ insertFrom (Select mfrom) fu = Update $ do
       UpdExpr upds = fu fromExpr
   return $ Updating (from' { selectExpr = expr } ) (DoInsert upds) tableE
   where
-    tn = tableName (undefined :: Proxy a)
+    tn = tableName (Proxy :: Proxy a)
 
 
 delete :: forall a. (Table a) => (AsExpr (Whole a) -> Expr Bool)
@@ -400,7 +400,7 @@ delete f = Update $ do
   return $ Updating (mkSelector mempty expr) { selectWhere = Just $ wher' }
          DoDelete tableE
   where
-    tn = tableName (undefined :: Proxy a)
+    tn = tableName (Proxy :: Proxy a)
 
 deleteFrom :: forall a from. (Table a) => Select from
                 -> (AsExpr (from:. Whole a) -> Expr Bool)
@@ -418,7 +418,7 @@ deleteFrom (Select mfrom) f = Update $ do
   return $ Updating (from' { selectExpr = expr,
                            selectWhere = Just $ where'' } ) (DoDelete) tableE
   where
-    tn = tableName (undefined :: Proxy a)
+    tn = tableName (Proxy :: Proxy a)
 
 returning :: (AsExpr a -> AsExpr b) -> Update a -> Update b
 returning f (Update mu) = Update $ do

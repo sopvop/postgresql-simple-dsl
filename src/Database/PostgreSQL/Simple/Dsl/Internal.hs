@@ -32,7 +32,7 @@ import           Database.PostgreSQL.Simple.ToField
 newtype Whole a = Whole { getWhole :: a } deriving (Eq, Ord, Show)
 
 instance Selectable a => FromRow (Whole a) where
-  fromRow = fmap Whole . entityRowParser $ entityParser (undefined :: Proxy a)
+  fromRow = fmap Whole . entityRowParser $ entityParser (Proxy :: Proxy a)
 
 -- | Data family describing columns
 data family Field v (t :: Symbol) b :: *
@@ -64,8 +64,8 @@ class Selectable v where
 instance (Selectable a, Selectable b) => Selectable (a,b) where
    entityParser _ = EntityParser (ca <> cb) ((,) <$> rpa <*> rpb)
      where
-       EntityParser ca rpa = entityParser (undefined :: Proxy a)
-       EntityParser cb rpb = entityParser (undefined :: Proxy b)
+       EntityParser ca rpa = entityParser (Proxy :: Proxy a)
+       EntityParser cb rpb = entityParser (Proxy :: Proxy b)
 
 fieldSym :: SingI t => Field v t a -> Sing (t::Symbol)
 fieldSym _ = sing
@@ -200,7 +200,7 @@ instance Selectable a => IsExpr (Whole a) where
   type AsExpr (Whole a) = Expr (Whole a)
   compileProjection (Expr a) = map (RawExpr . mkAccess a . mkTerm) columns
     where
-      columns = entityColumns $ entityParser (undefined :: Proxy a)
+      columns = entityColumns $ entityParser (Proxy :: Proxy a)
   makeSubRename t (Expr a) = do
     return $ (Expr a,  Expr t)
 
