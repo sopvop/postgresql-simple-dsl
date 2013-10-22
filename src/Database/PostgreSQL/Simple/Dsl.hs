@@ -7,10 +7,11 @@ module Database.PostgreSQL.Simple.Dsl
      (
      -- * Example of usage
      -- $use
-       select
-     , finish
+       query
+     , executeQuery
      , formatQuery
      , fromTable
+     , select
      , with
      , innerJoin
      , crossJoin
@@ -28,10 +29,10 @@ module Database.PostgreSQL.Simple.Dsl
      , insertFrom
      , delete
      , deleteFrom
+     , queryUpdate
      , executeUpdate
-     , update_
      , formatUpdate
-     , returningU
+     , returning
      , (=.)
      , setField
      , val
@@ -53,7 +54,6 @@ module Database.PostgreSQL.Simple.Dsl
      , entityRowParser
      ) where
 
-
 import           Data.ByteString                         (ByteString)
 import qualified Data.ByteString.Char8                   as B
 import qualified Data.DList                              as D
@@ -64,8 +64,7 @@ import           Data.Proxy                              (Proxy)
 import           GHC.TypeLits                            (SingI)
 
 import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
-                                                          FromRow, Only (..),
-                                                          query)
+                                                          FromRow, Only (..))
 import qualified Database.PostgreSQL.Simple              as PG
 import           Database.PostgreSQL.Simple.Dsl.Internal
 import           Database.PostgreSQL.Simple.ToField
@@ -117,7 +116,7 @@ import           Database.PostgreSQL.Simple.ToField
 --
 --
 --      getAllUsers :: Connection -> IO [Whole User]
---      getAllUsers c = select c $ fromTable
+--      getAllUsers c = query c $ select fromTable
 --
 --      allUsers :: Select (Whole User)
 --      allUsers = fromTable
@@ -127,6 +126,15 @@ import           Database.PostgreSQL.Simple.ToField
 -- @
 --
 --  This sql snippet maps to next code example
+--
+-- @
+--   SELECT * FROM users WHERE id = $1
+-- @
+--
+-- @
+--   getUser :: Query (Whole User)
+--   getUser x = select $ fromTable & where_ (\u->u~>UserId' ==. val x)
+-- @
 --
 -- @
 --      SELECT roles.role, role.user_id
@@ -164,7 +172,7 @@ import           Database.PostgreSQL.Simple.ToField
 fromTable :: forall a . (Table a, Selectable a) => Select (Whole a)
 fromTable = Select $ do
   nm <- grabName
-  let fromWhat = plain (B.append tn " AS ") `D.cons` getBuilder nm
+  let fromWhat = raw (B.append tn " AS ") <> getBuilder nm
       expr = Expr nm :: Expr (Whole a)
   return $ mkSelector fromWhat expr
   where
@@ -178,12 +186,11 @@ with (Select mw) (Select s) = Select $ do
   (compiled, subSelect) <- compileSelector w nm
   sq <- s
   let nameBld = getBuilder nm
-      withAct = (nameBld `D.snoc` plain " AS (")
-                `D.append` compiled `D.snoc` plain ") "
+      withAct = nameBld <> raw " AS (" <> compiled <> raw ") "
       newExpr = selectExpr sq :. subSelect
   return ( sq { selectWith = selectWith sq ++ [withAct]
               , selectExpr = newExpr
-              , selectFrom = (selectFrom sq `D.snoc` plain ",") `D.append` nameBld } )
+              , selectFrom = (selectFrom sq `fappend` raw ",") <> Just nameBld } )
 
 -- | Inner join on bool expression. Joins 'WHERE' clauses using AND
 innerJoin :: (AsExpr a :. AsExpr b -> Expr Bool) -> Select a -> Select b
@@ -194,15 +201,14 @@ innerJoin f (Select left) (Select right) = Select $ do
   let lexp = selectExpr leftq
       rexp = selectExpr rightq
       cond = getBuilder . getRawExpr $ f (lexp :. rexp)
-      fromClause =  (selectFrom leftq `D.snoc` plain " INNER JOIN ")
-                   `D.append` selectFrom rightq
-                   `D.snoc` plain " ON " `D.append` cond
+      fromClause =  (selectFrom leftq `fappend` raw " INNER JOIN ")
+                    <> (selectFrom rightq `fappend` (raw " ON " <> cond))
       whereClause = case selectWhere leftq of
         Nothing -> selectWhere rightq
         Just ex -> case selectWhere leftq of
           Nothing -> Just ex
           Just ex' -> Just (mkAnd ex ex')
-  return $ (mkSelector fromClause (lexp :. rexp) ) { selectWhere = whereClause }
+  return $ (mkSelector' fromClause (lexp :. rexp) ) { selectWhere = whereClause }
 
 -- | Do a cross join, SELECT .. FROM a,b
 crossJoin :: Select a -> Select b -> Select (a :. b)
@@ -211,14 +217,14 @@ crossJoin (Select left) (Select right) = Select $ do
   rightq <- right
   let lexp = selectExpr leftq
       rexp = selectExpr rightq
-      fromClause =  (selectFrom leftq `D.snoc` plain ",")
-                   `D.append` selectFrom rightq
-      whereClause = case selectWhere leftq of
-        Nothing -> selectWhere rightq
-        Just ex -> case selectWhere leftq of
-          Nothing -> Just ex
-          Just ex' -> Just (mkAnd ex ex')
-  return $ (mkSelector fromClause (lexp :. rexp) ) { selectWhere = whereClause }
+      fromClause =  (selectFrom leftq `fappend` raw ",")
+                    <> selectFrom rightq
+      whereClause = case (selectWhere leftq, selectWhere rightq) of
+        (Just l, Just r) -> Just $ mkAnd l r
+        (Nothing, Nothing) -> Nothing
+        (Just l, _) -> Just l
+        (_, Just r) -> Just r
+  return $ (mkSelector' fromClause (lexp :. rexp) ) { selectWhere = whereClause }
 
 -- | Append expression to WHERE clause
 where_ :: (AsExpr a -> Expr Bool) -> Select a -> Select a
@@ -245,7 +251,7 @@ orderOn f (Query mq) = Query $ do
   let compiled = compileSorting . f
       sort = case finishingOrder q of
                  Nothing -> compiled
-                 Just _ -> fmap (`D.snoc` plain ",") compiled
+                 Just _ -> raw "," `fprepend` compiled
   return q { finishingOrder = finishingOrder q <> Just sort }
 
 ascendOn :: (Expr a) -> Sorting
@@ -273,16 +279,19 @@ project f (Select mq) = Select $ do
     let newExpr = f (selectExpr q)
     return $ q { selectExpr = newExpr }
 
-finish :: IsExpr a => Select a -> Query a
-finish (Select mselector) = Query $ do
+select :: IsExpr a => Select a -> Query a
+select (Select mselector) = Query $ do
   selector <- mselector
   let exprs = selectExpr selector
   (bld, _) <- compileSelector selector =<< grabName
   return $ mkFinishing bld exprs
 
 -- | Execute query
-select :: (IsExpr a, FromRow a) => Connection -> Query a -> IO [a]
-select c q = query c "?" (Only $ finishQuery q)
+query :: (IsExpr a, FromRow a) => Connection -> Query a -> IO [a]
+query c q = PG.query c "?" (Only $ finishQuery q)
+
+executeQuery :: IsExpr r => Connection -> Query r -> IO Int64
+executeQuery c q = PG.execute c "?" (Only $ finishQuery q)
 
 formatQuery :: IsExpr a => Connection -> Query a -> IO ByteString
 formatQuery c q = PG.formatQuery c "?" (Only $ finishQuery q)
@@ -294,29 +303,29 @@ val = Expr . RawTerm . D.singleton . toField
 infix 4 ==., <., <=., >., >=.
 
 (==.) :: Expr a -> Expr a -> Expr Bool
-Expr a ==. Expr b = binOp (plain "=") a b
+Expr a ==. Expr b = binOpE (plain "=") a b
 
 (>.) :: Expr a -> Expr a -> Expr Bool
-Expr a >. Expr b = binOp (plain ">") a b
+Expr a >. Expr b = binOpE (plain ">") a b
 
 (>=.) :: Expr a -> Expr a -> Expr Bool
-Expr a >=. Expr b = binOp (plain ">=") a b
+Expr a >=. Expr b = binOpE (plain ">=") a b
 
 (<.) :: Expr a -> Expr a -> Expr Bool
-Expr a <. Expr b = binOp (plain "<") a b
+Expr a <. Expr b = binOpE (plain "<") a b
 
 (<=.) :: Expr a -> Expr a ->  Expr Bool
-Expr a <=. Expr b = binOp (plain "<=") a b
+Expr a <=. Expr b = binOpE (plain "<=") a b
 
 infixr 3 &&.
 (&&.), (||.) :: Expr Bool -> Expr Bool -> Expr Bool
-Expr a &&. Expr b = binOp (plain " AND ") a b
+Expr a &&. Expr b = binOpE (plain " AND ") a b
 
 infixr 2 ||.
-Expr a ||. Expr b = binOp (plain " OR ") a b
+Expr a ||. Expr b = binOpE (plain " OR ") a b
 
 (~>) :: (SingI t) => Expr (Whole a) -> Field a t b -> Expr b
-Expr lft ~> fld = Expr . RawExpr $ addParens lft `D.snoc` (plain (B.cons '.' f))
+Expr lft ~> fld = Expr . RawExpr $ addParens lft <> raw (B.cons '.' f)
   where
     f = fieldColumn fld
 
@@ -333,7 +342,7 @@ update :: forall a. (Table a) => (AsExpr (Whole a) -> Expr Bool)
                      -> UpdExpr a -> Update (Whole a)
 update f (UpdExpr upds) = Update $ do
   nm <- grabName
-  let tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
+  let tableE = raw (B.append tn " AS ") <> getBuilder nm
       expr = Expr nm :: Expr (Whole a)
       Expr wher' = f expr
   return $ Updating (mkSelector mempty expr) { selectWhere = Just $ wher' }
@@ -348,13 +357,13 @@ updateFrom (Select mfrom) f fu = Update $ do
   from' <- mfrom
   nm <- grabName
   let fromExpr = selectExpr from'
-      tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
+      tableE = raw (B.append tn " AS ") <> getBuilder nm
       expr = Expr nm :: Expr (Whole a)
       Expr wher' = f (fromExpr :. expr)
       UpdExpr upds = fu fromExpr
       where'' = case selectWhere from' of
         Nothing -> wher'
-        Just w -> RawExpr $ addParens w `D.snoc` plain " AND " <> addParens wher'
+        Just w -> RawExpr $ addParens w <> raw " AND " <> addParens wher'
   return $ Updating (from' { selectExpr = expr,
                            selectWhere = Just $ where'' } ) (DoUpdate upds) tableE
   where
@@ -400,30 +409,29 @@ deleteFrom (Select mfrom) f = Update $ do
   from' <- mfrom
   nm <- grabName
   let fromExpr = selectExpr from'
-      tableE = plain (B.append tn " AS ") `D.cons` getBuilder nm
+      tableE = raw (B.append tn " AS ") <> getBuilder nm
       expr = Expr nm :: Expr (Whole a)
       Expr wher' = f (fromExpr :. expr)
       where'' = case selectWhere from' of
         Nothing -> wher'
-        Just w -> RawExpr $ addParens w `D.snoc` plain " AND " <> addParens wher'
+        Just w -> RawExpr $ addParens w <> raw " AND " <> addParens wher'
   return $ Updating (from' { selectExpr = expr,
                            selectWhere = Just $ where'' } ) (DoDelete) tableE
   where
     tn = tableName (undefined :: Proxy a)
 
-
-returningU :: (AsExpr a -> AsExpr b) -> Update a -> Update b
-returningU f (Update mu) = Update $ do
+returning :: (AsExpr a -> AsExpr b) -> Update a -> Update b
+returning f (Update mu) = Update $ do
   u <- mu
   let sel = updatingSelect u
       exprs = selectExpr sel
   return $ u { updatingSelect = sel { selectExpr = f exprs } }
 
-executeUpdate :: (FromRow r, IsExpr r) => Connection -> Update r -> IO [r]
-executeUpdate c q = query c "?" (Only $ finishUpdate q)
+queryUpdate :: (FromRow r, IsExpr r) => Connection -> Update r -> IO [r]
+queryUpdate c q = PG.query c "?" (Only $ finishUpdate q)
 
-update_ :: IsExpr r => Connection -> Update r -> IO Int64
-update_ c q = PG.execute c "?" (Only $ finishUpdateNoRet q)
+executeUpdate :: IsExpr r => Connection -> Update r -> IO Int64
+executeUpdate c q = PG.execute c "?" (Only $ finishUpdateNoRet q)
 
 
 formatUpdate :: IsExpr a => Connection -> Update a -> IO ByteString

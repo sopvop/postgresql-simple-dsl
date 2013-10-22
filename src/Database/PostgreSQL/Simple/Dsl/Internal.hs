@@ -102,17 +102,34 @@ plain = Plain . B.fromByteString
 mkTerm :: ByteString -> RawExpr
 mkTerm = RawTerm . D.singleton . plain
 addParens :: RawExpr -> DList Action
-addParens (RawExpr t) = (plain "(" `D.cons` t) `D.snoc` plain ")"
+addParens (RawExpr t) = raw "(" <> t <> raw ")"
 addParens (RawTerm t) = t
 
-binOp :: Action -> RawExpr -> RawExpr -> Expr a
-binOp op a b = Expr . RawExpr $ addParens a `D.append` (op `D.cons` addParens b)
+opt Nothing = mempty
+opt (Just x) = x
+
+fprepend :: (Functor f, Monoid b) => b -> f b -> f b
+fprepend p a = (<> p) <$> a
+fappend :: (Functor f, Monoid b) => f b -> b -> f b
+fappend a x = (x <>) <$> a
+
+raw :: ByteString -> ExprBuilder
+raw = D.singleton . plain
+
+rawField :: ToField a => a -> ExprBuilder
+rawField = D.singleton . toField
+
+binOp :: Action -> RawExpr -> RawExpr -> RawExpr
+binOp op a b = RawExpr $ addParens a <> D.singleton op <> addParens b
+
+binOpE :: Action -> RawExpr -> RawExpr -> Expr a
+binOpE op a b = Expr (binOp op a b)
 
 mkAnd :: RawExpr -> RawExpr -> RawExpr
-mkAnd a b = RawExpr $ addParens a `D.append` (plain " AND " `D.cons` addParens b)
+mkAnd a b = binOp (plain " AND ") a b
 
 mkAccess :: RawExpr -> RawExpr -> DList Action
-mkAccess a b = D.append (addParens a) (plain "." `D.cons` (addParens b))
+mkAccess a b = addParens a <> raw "." <> addParens b
 
 commaSep :: [ExprBuilder] -> ExprBuilder
 commaSep = D.concat . intersperse (D.singleton . Plain $ B.fromChar ',')
@@ -135,14 +152,17 @@ instance Monoid GroupByExpr where
           Nothing -> Just ah'
           Just bh' -> Just $ mkAnd ah' bh'
 
-data Selector a = Selector { selectFrom  :: ExprBuilder
+data Selector a = Selector { selectFrom  :: Maybe ExprBuilder
                            , selectWith  :: [ExprBuilder]
                            , selectWhere :: Maybe RawExpr
                            , selectExpr  :: AsExpr a
                            }
 
 mkSelector :: ExprBuilder -> (AsExpr a) -> Selector a
-mkSelector c a = Selector c [] Nothing a
+mkSelector c a = Selector (Just c) [] Nothing a
+
+mkSelector' :: Maybe ExprBuilder -> (AsExpr a) -> Selector a
+mkSelector' c a = Selector c [] Nothing a
 
 -- | Source of uniques
 newtype NameSource = NameSource { getNameSource :: Int }
@@ -262,7 +282,7 @@ instance (IsExpr a, IsExpr b) => IsExpr (a:.b) where
 mkSubSelect :: RawExpr -> RawExpr -> Expr a
 mkSubSelect s nm = Expr . RawExpr $ mkAccess s nm
 mkRename :: RawExpr -> RawExpr -> Expr a
-mkRename a nm = binOp (plain " AS ") a nm
+mkRename a nm = binOpE (plain " AS ") a nm
 
 
 finishSelect :: IsExpr a => Select a -> Action
@@ -273,24 +293,22 @@ finishSelect (Select mq) = Many . D.toList . fst . fst $
     compileSelector sel nm
 
 prepareSelector :: (IsExpr a) => Selector a -> RawExpr ->
-                Namer (ExprBuilder, ExprBuilder, ExprBuilder, ExprBuilder, AsExpr a)
+                Namer (ExprBuilder, Maybe ExprBuilder, ExprBuilder, ExprBuilder, AsExpr a)
 prepareSelector sel nm = do
   (projExprs, access) <- makeSubRename nm $ selectExpr sel
   let withClause = case selectWith sel of
         [] -> mempty
-        ws -> plain "WITH " `D.cons` commaSep ws
+        ws -> raw "WITH " <> commaSep ws
       proj = commaSep $ map getBuilder $ compileProjection projExprs
-      whereClause = case selectWhere sel of
-        Nothing -> mempty
-        Just ex -> plain " WHERE " `D.cons` getBuilder ex
-  return (withClause, selectFrom sel, whereClause, proj, access)
-
+      whereClause = (mappend (raw " WHERE ") . getBuilder) <$> selectWhere sel
+  return (withClause, selectFrom sel, opt whereClause, proj, access)
 
 compileSelector :: IsExpr a => Selector a -> RawExpr -> Namer (ExprBuilder, AsExpr a)
 compileSelector sel nm = do
   (with, from, where', project, access) <- prepareSelector sel nm
-  return (with <> (plain "SELECT " `D.cons` project) `D.snoc` plain " FROM "
-               <> from <> where', access)
+  return (with <> raw "SELECT " <> project <>
+         opt (raw " FROM " `fprepend` from)
+         <> where', access)
 
 data Finishing a = Finishing
   { finishingSelect :: ExprBuilder
@@ -313,29 +331,25 @@ compileFinishing :: IsExpr a => Namer (Finishing a) -> Namer (ExprBuilder)
 compileFinishing mfin = do
   fin <- mfin
   let exprs = finishingExpr fin
+      having = Just (raw " HAVING ") <> (finishingHaving fin <*> pure exprs)
       groupByClause = case finishingGroup fin of
         Nothing -> mempty
         Just order ->
-          plain " GROUP BY " `D.cons` order exprs
-          <> case finishingHaving fin of
-             Nothing -> mempty
-             Just havs -> plain " HAVING " `D.cons` havs exprs
-      orderClause = case finishingOrder fin of
-        Nothing -> mempty
-        Just sorts -> plain " ORDER BY " `D.cons` sorts exprs
-      offsetClause = case finishingOffset fin of
-        Nothing -> mempty
-        Just off -> D.fromList [plain " OFFSET ", Plain $ B.fromShow off]
-      limitClause = case finishingLimit fin of
-        Nothing -> mempty
-        Just lim -> D.fromList [plain " LIMIT ", Plain $ B.fromShow lim]
-  return $ finishingSelect fin <> orderClause <> groupByClause <> offsetClause <> limitClause
+          raw " GROUP BY " <> order exprs <> opt having
+      orderClause = raw " ORDER BY " `fprepend` (finishingOrder fin <*> pure exprs)
+      offsetClause= raw " OFFSET " `fprepend` (rawField <$> finishingOffset fin)
+      limitClause = raw " LIMIT " `fprepend` (rawField <$> finishingLimit fin)
+  return $ finishingSelect fin
+         <> opt orderClause
+         <> groupByClause
+         <> opt offsetClause
+         <> opt limitClause
 
 data Sorting = Asc RawExpr | Desc RawExpr
 
 compileSorting :: Sorting -> ExprBuilder
-compileSorting (Asc r) = getBuilder r `D.snoc` plain " ASC "
-compileSorting (Desc r) = getBuilder r `D.snoc` plain " DESC "
+compileSorting (Asc r) = getBuilder r <> raw " ASC "
+compileSorting (Desc r) = getBuilder r <> raw " DESC "
 
 data UpdatingAct = DoUpdate [(ByteString, RawExpr)]
                  | DoInsert [(ByteString, RawExpr)]
@@ -357,17 +371,15 @@ compileUpdateAct sel upd tbl = do
   nm <- grabName
   (with, from, where', project, access) <- prepareSelector sel nm
   let setClause = commaSep $ map mkUpd upd
-      updTable = (plain " UPDATE " `D.cons` tbl) `D.snoc` plain " SET "
+      updTable = raw " UPDATE " <> tbl <> raw " SET "
       ret = case D.toList project of
         [] -> mempty
         xs -> D.fromList (plain " RETURNING " : xs)
-      from' = case D.toList from of
-        [] -> mempty
-        xs -> D.fromList (plain " FROM " :xs)
-  return $ (with <> updTable <> setClause <> from' <> where', ret, access)
+      from' = raw " FROM " `fprepend` from
+  return $ (with <> updTable <> setClause <> opt from' <> where', ret, access)
   where
-    mkUpd (bs, act) = D.cons (Plain $ B.fromByteString bs <> B.fromByteString "=")
-                       (getBuilder act)
+    mkUpd (bs, act) = D.singleton (Plain $ B.fromByteString bs <> B.fromByteString "=")
+                          <> getBuilder act
 
 compileInsertAct :: IsExpr a => Selector a -> [(ByteString, RawExpr)] -> ExprBuilder
               -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
@@ -376,29 +388,25 @@ compileInsertAct sel upd tbl = do
   (with, from, where', project, access) <- prepareSelector sel nm
   let cols = commaSep $ map (D.singleton.plain.fst) upd
       vals = commaSep $ map (getBuilder.snd) upd
-      updTable = (plain " INSERT INTO " `D.cons` tbl) `D.snoc` plain "("
-               <> cols `D.snoc` plain ") SELECT " <> vals `D.snoc` plain ""
+      updTable = raw " INSERT INTO " <> tbl <> raw "("
+               <> cols <> raw ") SELECT " <> vals
       ret = case D.toList project of
         [] -> mempty
         xs -> D.fromList (plain " RETURNING " : xs)
-      from' = case D.toList from of
-        [] -> mempty
-        xs -> D.fromList (plain " FROM " :xs)
-  return $ (with <> updTable <> from' <> where', ret, access)
+      from' = raw " FROM " `fprepend` from
+  return $ (with <> updTable <> opt from' <> where', ret, access)
 
 compileDeleteAct :: IsExpr a => Selector a -> ExprBuilder
               -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
 compileDeleteAct sel tbl = do
   nm <- grabName
   (with, from, where', project, access) <- prepareSelector sel nm
-  let updTable = (plain " DELETE FROM " `D.cons` tbl)
+  let updTable = raw " DELETE FROM " <> tbl
       ret = case D.toList project of
         [] -> mempty
         xs -> D.fromList (plain " RETURNING " : xs)
-      from' = case D.toList from of
-        [] -> mempty
-        xs -> D.fromList (plain " USING " :xs)
-  return $ (with <> updTable <> from' <> where', ret, access)
+      from' = raw " USING " `fprepend` from
+  return $ (with <> updTable <> opt from' <> where', ret, access)
 
 
 compileUpdate :: IsExpr a => Update a -> Namer (ExprBuilder, ExprBuilder, AsExpr a)
