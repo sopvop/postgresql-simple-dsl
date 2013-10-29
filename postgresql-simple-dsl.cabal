@@ -29,8 +29,9 @@ library
                        bytestring,
                        tagged,
                        transformers,
-                       mtl
-
+                       text,
+                       mtl,
+                       free
   hs-source-dirs:      src
   default-language:    Haskell2010
   ghc-options: -funbox-strict-fields -O2 -Wall -fwarn-tabs

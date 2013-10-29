@@ -9,10 +9,12 @@
 
 
 module Database.PostgreSQL.Simple.Dsl.Entity
-    ( getEntity
+    ({- getEntity
     , updateEntity
     , insertEntity
     , deleteEntity
+    , Entity(..)
+    , Storable(..) -}
     ) where
 
 import           Control.Monad                           (void)
@@ -24,7 +26,7 @@ import           Database.PostgreSQL.Simple.Dsl.Internal
 import           Database.PostgreSQL.Simple.FromField    (FromField)
 import           Database.PostgreSQL.Simple.ToField      (Action (..),
                                                           ToField (..))
-
+{-
 class (Selectable a, Table a, ToField (EntityId a), FromField (EntityId a)) => Entity a where
    type EntityId a :: *
    idField :: Expr (Whole a) -> Expr (EntityId a)
@@ -64,3 +66,4 @@ deleteEntity :: forall a . Entity a => Connection -> EntityId a -> IO ()
 deleteEntity c eid = void $ executeUpdate c del
   where
     del = delete (\(u::Expr (Whole a)) -> idField u ==. val eid)
+-}
