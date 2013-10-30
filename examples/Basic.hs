@@ -73,12 +73,11 @@ getAllUsers c = query c $ fromTable
 users = table "users" :: From (Rel User)
 roles = table "project_roles" :: From (Rel Role)
 
--- | all roles for login
-{-
 get_class_path :: Expr UserId -> Expr String
 get_class_path e = call . arg e $ function "get_class_path"
--}
+
 printQ con = putStrLn . B.unpack <=< formatQuery con
+printU con = putStrLn . B.unpack <=< formatUpdate con
 main = do
   con <- connectPostgreSQL "dbname=testdb user=lonokhov password=batman"
   return ()
@@ -109,38 +108,13 @@ main = do
                 return (r :. only (x~>UserKey))
   printQ con qUrr
   query con qUrr
-  {-
-  usrs <- query con (userRoles "oleg" & select)
-  mapM_ print usrs
-  let q = userRoles2 & where_ (\(u:._)->u~>UserId' ==. val (UserId 2))
-  mapM_ print =<< query con (select q)
-  print =<< formatQuery con (select q)
-  let qq = userRoles "oleg" & select
-                            & orderOn (\(name, _) -> descendOn name)
-  print =<< formatQuery con qq
-  print =<< query con qq
-  let uq = update (\u-> u~>UserLogin ==. val "admin")
-                    (UserCerebroLogin =. val "22")
-                   & returning (\u -> (u~>UserId', u~>UserCerebroLogin))
-  print =<< formatUpdate con uq
-  print =<< executeUpdate con uq
-
-  let ins = insert (UserLogin =. val "foo")
-  print =<< formatUpdate con ins
-  let ins2 = insertFrom (fromTable & where_ (\u->u~>UserLogin ==. val "admin"))
-             (\u -> UserLogin =. val "foo" <> UserPass =. u~>UserPass)
-  print =<< formatUpdate con ins2
-  let del1 = delete (\u-> u~>UserLogin ==. val "foo")
-  print =<< formatUpdate con del1
-  let del2 = deleteFrom (fromTable & where_ (\u->u~>UserLogin ==. val "admin"))
-            (\(ut:.u) -> u~>UserLogin ==. val "foo" &&. u~>UserPass ==. ut~>UserPass)
-  print =<< formatUpdate con del2
-  print =<< executeUpdate con del2
-  let with1 = with (select $ fromTable & where_ (\u->u~>UserLogin ==. val "oleg"))
-        $ \u1 -> with (select $ fromTable & where_ (\u->u~>UserLogin ==. val "ozaycev"))
-         $ \u2 -> fromTable & where_
-           (\r->r~>RoleUserId ==. u1~>UserId' ||. r~>RoleUserId ==. u2~>UserId')
-      with2 = with1 & project (\r -> (r~>RoleName, get_class_path(r~>RoleUserId)))
-  print =<< formatQuery con (select with2)
-  mapM_ (print )  <=< query con $ select with2
-  -}
+  let updQ = update users $ \u -> do
+               setField UserCerebroLogin (val "baz")
+               where_ $ u~>UserLogin ==. val ("admin")
+               return u
+  printU con updQ
+  queryUpdate con updQ
+  mapM_ (putStrLn . fromOnly) <=< query con $ do
+     x <- from users
+     where_ $ x~>UserLogin ==. val "admin"
+     return $ only (x~>UserCerebroLogin)

@@ -9,29 +9,23 @@
 
 
 module Database.PostgreSQL.Simple.Dsl.Entity
-    ({- getEntity
+    ( getEntity
     , updateEntity
     , insertEntity
     , deleteEntity
     , Entity(..)
-    , Storable(..) -}
     ) where
 
-import           Control.Monad                           (void)
+import           Control.Monad                        (void)
 
-import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
-                                                          Only (..))
+import           Database.PostgreSQL.Simple           (Connection)
 import           Database.PostgreSQL.Simple.Dsl
-import           Database.PostgreSQL.Simple.Dsl.Internal
-import           Database.PostgreSQL.Simple.FromField    (FromField)
-import           Database.PostgreSQL.Simple.ToField      (Action (..),
-                                                          ToField (..))
-{-
-class (Selectable a, Table a, ToField (EntityId a), FromField (EntityId a)) => Entity a where
-   type EntityId a :: *
-   idField :: Expr (Whole a) -> Expr (EntityId a)
+import           Database.PostgreSQL.Simple.FromField (FromField)
+import           Database.PostgreSQL.Simple.ToField   (ToField)
 
-class (Entity a) => Storable a where
+class (Record a, Table a, ToField (EntityId a), FromField (EntityId a)) => Entity a where
+   type EntityId a :: *
+   idField :: Rel a -> Expr (EntityId a)
    entityUpdate :: a -> UpdExpr a
 
 
@@ -50,20 +44,27 @@ takeOnlyE _ = error "takeOnlyE: Need proper error here"
 getEntity :: Entity a => Connection -> EntityId a -> IO (Maybe a)
 getEntity c eid = takeOne =<< query c sel
    where
-     sel = select . where_ (\en ->idField en ==. val eid) $ fromTable
+     sel = do
+       t <- fromTable
+       where_ (idField t ==. val eid)
+       return t
 
 updateEntity :: Entity a => Connection -> EntityId a -> UpdExpr a -> IO ()
 updateEntity c eid upds = void $ executeUpdate c upd
    where
-     upd = update (\u -> idField u ==. val eid) upds
+     upd = updateTable $ \t -> do
+          setFields upds
+          where_ $ idField t ==. val eid
 
-insertEntity :: Storable a => Connection -> a -> IO (EntityId a)
+insertEntity :: Entity a => Connection -> a -> IO (EntityId a)
 insertEntity c ent = takeOnlyE =<< queryUpdate c ins
    where
-    ins = returning (\e -> only (idField e)) $ insert (entityUpdate ent)
+    ins = insertIntoTable $ \r -> do
+        setFields (entityUpdate ent)
+        return $ only $ idField r
 
 deleteEntity :: forall a . Entity a => Connection -> EntityId a -> IO ()
 deleteEntity c eid = void $ executeUpdate c del
   where
-    del = delete (\(u::Expr (Whole a)) -> idField u ==. val eid)
--}
+    del = deleteFromTable $ \(r :: Rel a) -> do
+       where_ $ idField r ==. val eid

@@ -65,20 +65,14 @@ instance Applicative (RecordParser v) where
   {-# INLINE pure #-}
   {-# INLINE (<*>) #-}
 
--- | Class for naming tables
-class Table v where
-  tableName :: Proxy v -> ByteString
-
 -- | Class for entities which have columns
 class Record v where
   data Field v (t :: Symbol) b :: *
   recordParser :: Proxy v -> RecordParser v v
 
-instance (Record a, Record b) => Record (a,b) where
-   recordParser _ = RecordParser (ca <> cb) ((,) <$> rpa <*> rpb)
-     where
-       RecordParser ca rpa = recordParser (Proxy :: Proxy a)
-       RecordParser cb rpb = recordParser (Proxy :: Proxy b)
+-- | Class for naming tables
+class Record v =>Table v where
+  tableName :: Proxy v -> ByteString
 
 fieldSym :: SingI t => Field v t a -> Sing (t::Symbol)
 fieldSym _ = sing
@@ -102,8 +96,10 @@ instance ToField (Expr a) where
 plain :: ByteString -> Action
 plain = Plain . B.fromByteString
 
+addParens :: ExprBuilder -> ExprBuilder
 addParens t = raw "(" <> t <> raw ")"
 
+opt :: Monoid a => Maybe a -> a
 opt Nothing = mempty
 opt (Just x) = x
 
@@ -149,9 +145,9 @@ class IsExpr a where
 
 instance Record a => IsExpr (Rel a) where
   type FromExpr (Rel a) = Whole a
-  compileProjection r = do
+  compileProjection rel = do
     nm <- grabName
-    let projector c = case r of
+    let projector c = case rel of
          Rel r -> r <> raw ".\"" <> raw c <> raw "\" AS " <> renamed nm c
          RelAliased r -> raw "\""<> renamed r c <> raw "\""
         proj = mconcat $ intersperse (raw ",") $ map projector columns
@@ -333,19 +329,6 @@ finishUpdateNoRet q = Many . D.toList $ upd
   where (upd, _, _) = fst $  runState (compileUpdate q) (NameSource 0)
 
 
-data Function a = Function { functionName :: ByteString
-                           , functionArgs :: [ExprBuilder]
-                           }
-
-arg :: Expr t -> Function a -> Function a
-arg (Expr v) f = f { functionArgs = functionArgs f ++ [v]}
-
-function :: ByteString -> Function a
-function bs = Function bs []
-
-call :: Function a -> Expr a
-call (Function bs args) = Expr  $
-   raw bs <> raw "(" <> commaSep (map args) <> raw ")"
 
 -}
 
@@ -367,6 +350,8 @@ instance Monoid QueryState where
                    (joinWith (raw ",") sa sb)
                    (getLast (Last la <> Last lb))
                    (getLast (Last oa <> Last ob))
+
+joinWith :: Monoid a => a -> Maybe a -> Maybe a -> Maybe a
 joinWith j (Just a) (Just b) = Just (a <> j <> b)
 joinWith _ (Just a) _ = Just a
 joinWith _ _ (Just b) = Just b
@@ -416,6 +401,14 @@ finishQuery mq = Many $ D.toList res
       (proj, _) <- compileProjection r
       return $ finishIt proj q'
 
+finishQueryNoRet :: Query t -> Action
+finishQueryNoRet mq = Many $ D.toList res
+  where
+    res = fst $ runState finisher (NameSource 0)
+    finisher = do
+      (_, q') <- compIt mq
+      return $ finishIt (raw "true") q'
+
 whereQ :: Expr t -> Query ()
 whereQ (Expr r) = Query $ do
   lift $ tell mempty {queryStateWhere = Just r}
@@ -424,13 +417,13 @@ type FromM a = State NameSource a
 
 
 data FromD a where
-   FromTable      :: ExprBuilder -> a -> FromD a
+   FromTable      :: ExprBuilder -> ExprBuilder -> a -> FromD a
    FromInnerJoin  :: FromD a -> FromD b -> ExprBuilder -> FromD (a:.b)
    FromCrossJoin  :: FromD a -> FromD b -> FromD (a:.b)
 
 
 fromExpr :: FromD a -> a
-fromExpr (FromTable _ a) = a
+fromExpr (FromTable _ _ a) = a
 fromExpr (FromInnerJoin a b _) = fromExpr a :. fromExpr b
 fromExpr (FromCrossJoin a b) = fromExpr a :. fromExpr b
 
@@ -438,7 +431,7 @@ newtype From a = From { runFrom :: State NameSource (FromD a) }
 
 
 compileFrom :: FromD a -> (ExprBuilder, a)
-compileFrom (FromTable bs a) = (bs, a)
+compileFrom (FromTable bs alias a) = (bs<> raw " AS " <> alias, a)
 
 compileFrom (FromInnerJoin a b cond) = (bld, ea:.eb)
   where
@@ -485,7 +478,8 @@ compileInserting table (Inserting a) = do
   put ns'
   let (cols, exprs) = unzip $ insertWriterSets q
       compiledSel = finishIt (commaSep exprs) $ insertWriterFrom q
-      res = raw "INSERT INTO "<>table <> raw " (" <> compiledSel <> raw ")"
+      res = raw "INSERT INTO "<>table <> raw "(" <> commaSep (map raw cols)
+          <> raw ") (" <> compiledSel <> raw ")"
   return (r,res)
 
 newtype Updating r a = Updating {
@@ -496,7 +490,7 @@ newtype Updating r a = Updating {
 finishUpdating :: [(ByteString, ExprBuilder)] -> ExprBuilder -> QueryState -> ExprBuilder
 finishUpdating setters table q =
         opt (raw " WITH " `fprepend` queryStateWith q)
-        <> raw "UPDATE TABLE "<> table
+        <> raw "UPDATE "<> table
         <> raw " SET " <> sets
         <> opt (raw " FROM "`fprepend` queryStateFrom q)
         <> opt (raw " WHERE " `fprepend` queryStateWhere q)
@@ -510,8 +504,43 @@ compileUpdating table (Updating a) = do
   ns <- get
   let ((r, ns'), q) = runWriter (runStateT a ns)
   put ns'
-  let (cols, exprs) = unzip $ insertWriterSets q
-      compiled = finishUpdating (insertWriterSets q) table $ insertWriterFrom q
+  let compiled = finishUpdating (insertWriterSets q) table $ insertWriterFrom q
   return (r,compiled)
 
+newtype Deleting t a = Deleting { runDeleting :: QueryM a}
+        deriving (Monad, Functor, Applicative)
+
+compileDeleting :: MonadState NameSource m => ExprBuilder -> Deleting t a -> m (a, ExprBuilder)
+compileDeleting table (Deleting x) = do
+  (expr, q) <- compIt (Query x)
+  let res = opt (raw " WITH " `fprepend` queryStateWith q)
+        <> raw "DELETE FROM "<> table
+        <> opt (raw " USING "`fprepend` queryStateFrom q)
+        <> opt (raw " WHERE " `fprepend` queryStateWhere q)
+  return (expr, res)
+
 newtype Update a = Update { runUpdate :: State NameSource (a, ExprBuilder) }
+
+finishUpdate :: IsExpr t => Update t -> Action
+finishUpdate (Update u) = Many . D.toList . fst $ runState (u >>= compiler) (NameSource 0)
+  where
+    compiler (expr, bld) = do
+      (proj, _) <- compileProjection expr
+      return $ (bld <> raw " RETURNING "<> proj)
+
+finishUpdateNoRet :: Update a -> Action
+finishUpdateNoRet (Update u) = Many . D.toList . snd . fst $ runState u (NameSource 0)
+
+data Function a = Function { functionName :: ByteString
+                           , functionArgs :: [ExprBuilder]
+                           }
+
+arg :: Expr t -> Function a -> Function a
+arg (Expr v) f = f { functionArgs = functionArgs f ++ [v]}
+
+function :: ByteString -> Function a
+function bs = Function bs []
+
+call :: Function a -> Expr a
+call (Function bs args) = Expr  $
+   raw bs <> raw "(" <> commaSep args <> raw ")"

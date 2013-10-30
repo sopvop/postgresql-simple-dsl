@@ -1,69 +1,85 @@
-{-# LANGUAGE DataKinds           #-}
-{-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeFamilies        #-}
-{-# LANGUAGE TypeOperators       #-}
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TypeFamilies          #-}
+{-# LANGUAGE TypeOperators         #-}
 module Database.PostgreSQL.Simple.Dsl
      (
      -- * Example of usage
      -- $use
-       query
-     , executeQuery
+     -- * Defining Records
+       Record (..)
+     , takeField
+     , RecordParser
+     , recordRowParser
+
+     -- * Exequting queries
+     , Query
+     , query
+     , execute
      , formatQuery
-     , fromTable
-     -- , select
-     , with
+     -- * From
+     , Table (..)
+     , From
      , from
      , table
+     , fromTable
      , innerJoin
      , crossJoin
      , subSelect
+     -- * With
+     , with
+     , withUpdate
+     -- * Query
      , where_
      , orderBy
      , ascendOn
      , descendOn
      , limitTo
      , offsetTo
-     {-
+     -- * Updates
      , Update
+     , UpdExpr
+     , Updating
      , update
-     , updateFrom
+     , updateTable
+     , Inserting
      , insert
-     , insertFrom
+     , insertIntoTable
+     , Deleting
      , delete
-     , deleteFrom
+     , deleteFromTable
+     , set
+     , (=.)
+     , (=.!)
+     , setField
+     , setFields
+     -- * Executing updates
      , queryUpdate
      , executeUpdate
      , formatUpdate
-     , returning
-     , (=.)
-     , (=.!)
-     , setField -}
+     -- * Expressions
+     , Rel, (~>)
+     , Expr
      , val
+     , (==.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
+     , true, false, isNull, isInList
      , whole
      , only
+     -- * Helpers
      , Whole(..)
      , Only(..)
      , (:.)(..)
-     , From
-     , Query
-     , Expr, Rel
-     , (==.), (<.), (<=.), (>.), (>=.), (||.), (&&.), (~>), ( ~.)
-     , true, false, isNull, isInList
-     , Field
-     , Table (..)
-     , Record (..)
-     , takeField
+     -- * Helpers
      , IsExpr
-     , RecordParser
-     , recordRowParser
-{-     , UpdExpr
+     , FromExpr
+     -- * Functions
      , Function
-     , arg
      , function
+     , arg
      , call
-     -}
      ) where
 import           Control.Applicative
 import           Control.Monad.State.Class
@@ -72,7 +88,6 @@ import           Control.Monad.Trans.State               (runState)
 import           Control.Monad.Trans.Writer
 
 import           Data.ByteString                         (ByteString)
-import qualified Data.ByteString.Char8                   as B
 import qualified Data.DList                              as D
 import           Data.Int                                (Int64)
 import           Data.List                               (intersperse)
@@ -103,44 +118,42 @@ import           Database.PostgreSQL.Simple.ToField
 --
 --      data Role = Role { roleUserId :: UserId, roleName :: ByteString }
 --                  deriving (Show)
+--      instance Record User where
+--        data Field User t a where
+--          UserKey   :: Field User \"id\" UserId
+--          UserLogin :: Field User \"login\" String
+--          UserPass  :: Field User \"passwd\" ByteString
+--          UserIsDeleted :: Field User \"is_deleted\" Bool
+--        recordParser _ = User \<$> fromField UserId'
+--                              \<*> fromField UserLogin
+--                              \<*> fromField UserPass
+--                              \<* takeField UserIsDelete
+-- @
 --
---      data instance Field User t a where
---        UserId'   :: Field User \"id\" UserId
---        UserLogin :: Field User \"login\" String
---        UserPass  :: Field User \"passwd\" ByteString
+-- Note that UserIsDeleted fieds is not used in parsers, but is still required
+-- to mention
 --
+-- @
 --      instance Table User where
 --        tableName _ = \"users\"
 --
---      instance Selectable User where
---        entityParser _ = User \<$> fromField UserId'
---                              \<*> fromField UserLogin
---                              \<*> fromField UserPass
 --
 --      instance Entity User where
 --        type EntityId User = UserId
---        type EntityIdColumn User = \"id\"
+--        idField w = w~>UserKey
 --
---      data instance Field Role t a where
---        RoleUserId :: Field Role \"user_id\" UserId
---        RoleName   :: Field Role \"role\" ByteString
---
---      instance Table Role where
---        tableName _ = \"roles\"
---
---      instance Selectable Role where
---        entityParser _ = Role \<$> fromField RoleUserId
+--      instance Record Role where
+--        data Field Role t a where
+--          RoleUserId :: Field Role \"user_id\" UserId
+--          RoleName   :: Field Role \"role\" ByteString
+--        recordParser \_ = Role \<$> fromField RoleUserId
 --                              \<*> fromField RoleName
 --
 --
---      getAllUsers :: Connection -> IO [Whole User]
---      getAllUsers c = query c $ select fromTable
+--      roles = table \"roles\" :: From (Rel Role)
 --
---      allUsers :: Select (Whole User)
---      allUsers = fromTable
---
---      allRoles :: Select (Whole Role)
---      allRoles = fromTable
+--      allUsers2 = fromTable :: Query (Rel User)
+--      allRoles = from roles
 -- @
 --
 --  This sql snippet maps to next code example
@@ -149,54 +162,67 @@ import           Database.PostgreSQL.Simple.ToField
 --   SELECT * FROM users WHERE id = $1
 -- @
 --
+--
 -- @
---   getUser :: Query (Whole User)
---   getUser x = select $ fromTable & where_ (\u->u~>UserId' ==. val x)
+--    getUser :: UserId -> Query (Rel User)
+--    getUser uid = do
+--      u <- fromTable
+--      where_ $  u~>UserKey ==. val uid
+--      return u
 -- @
+--
 --
 -- @
 --      SELECT roles.role, role.user_id
---      FROM users
---      INNER JOIN roles ON users.id = roles.user_id
---      WHERE user.login = ?
+--      FROM users, roles
+--      WHERE users.id = roles.user_id AND user.login = $1
 -- @
 --
--- @
---      userRoles :: String -> Select (ByteString, UserId)
---      userRoles login =
---        innerJoin (\\(usr :. rol) -> usr~>UserId' ==. rol~>RoleUserId)
---                  -- ^ joining on user.id == roles.user_id
---                  (allUsers & where_ (\u -> u~>UserLogin ==. val login))
---                  -- ^ restrict to user with needed login
---                  allRoles
---                  -- ^ select all roles
---        & project (\\(usr :. rol) -> (rol~>RoleName, rol~>RoleUserId))
---          -- select only roles.role and role.user_id fields
--- @
 --
 -- @
---     SELECT users.*, roles.*
---     FROM users, roles
---     WHERE users.id = role.user_id
+--      userRoles :: String -> Query (Rel User :. Rel Role)
+--      userRoles login = do
+--          u <- fromTable
+--          r <- from roles
+--          where $ u~>UserKey ==. r~>RoleUserId &&. u~>UserLogin ==. val login
+--          return (u:.r)
 -- @
 --
+-- With explicit joins. Not recommended for postgres, unless you join more that 6 tables
+-- and optimizer is too slow.
+--
 -- @
---      userRoles2 = crossJoin fromTable fromTable
---                 & where_ (\\(u:.rol) -> u~>UserId' ==. rol~>RoleUserId)
+--      SELECT roles.role, role.user_id
+--      FROM users INNER JOIN roles ON users.id = roles.user_id
+--      WHERE user.login = $1
 -- @
+--
+--
+-- @
+--     userRoles2 login = do
+--       r\@(u:.r) <- from \$ innerJoin roles recordTable
+--                        \$ \r u -> r~>RoleUserId ==. u~>UserKey
+--       where $ u~>UserLogin ==. val login
+--       return r
+-- @
+--
 --
 
 class (Monad m) => IsQuery m where
   with :: (IsExpr a, IsExpr b) => Query a -> (a -> m b) -> m b
+  withUpdate  :: (IsExpr a, IsExpr b, IsQuery m) => Update a -> (a -> m b) -> m b
   from :: From a -> m a
   where_ :: Expr Bool -> m ()
 
+-- | Name a table, add proper type annotation for type safety.
+--   This is helpfyl if you can select your record from several tables or views.
+--   Using Table class is safer
 table :: (Record a) => ByteString -> From (Rel a)
 table bs = From $ do
   nm <- grabName
   let as = raw "\"" <> nm <> raw "\""
-      from' = raw "\"" <> raw bs <> raw "\" AS " <> as
-  return $ FromTable from' (Rel as)
+      from' = raw "\"" <> raw bs <> raw "\""
+  return $ FromTable from' as (Rel as)
 
 -- | Start query with table - SELECT table.*
 fromTable :: forall a.(Table a, Record a) => Query (Rel a)
@@ -211,6 +237,15 @@ instance IsQuery Query where
          lift $ tell w
          return r
       f r
+   withUpdate u f = do
+     r <- Query $ do
+        (with, expr) <- updateToQuery u
+        nm <- grabName
+        lift $ tell mempty { queryStateWith = Just $ nm <> raw " AS (" <> with <> raw ")"
+                           , queryStateFrom = Just nm }
+        return expr
+     f r
+
    where_ (Expr r) = Query $ do
      lift $ tell mempty {queryStateWhere = Just r}
    from f = Query $ do
@@ -234,6 +269,11 @@ prepareFrom (From mfrm) = do
    put ns'
    return (expr, mempty { queryStateFrom = Just cmp })
 
+-- | from Table instance
+recordTable :: forall a . (Table a) => From (Rel a)
+recordTable = table $ tableName (Proxy :: Proxy a)
+
+-- | Inner join
 innerJoin :: forall a b .(IsExpr a, IsExpr b, Table b) =>
    From a -> From b -> (a -> b -> Expr Bool) -> From (a:.b)
 innerJoin (From mfa) (From mfb) f = From $ do
@@ -242,10 +282,20 @@ innerJoin (From mfa) (From mfb) f = From $ do
     let Expr onexpr = f (fromExpr fa) (fromExpr fb)
     return $ FromInnerJoin fa fb onexpr
 
+-- | Cross join
 crossJoin :: forall a b .(IsExpr a, IsExpr b, Table b) =>
-   From a -> From b -> (a -> b -> Expr Bool) -> From (a:.b)
-crossJoin (From fa) (From fb) f = From $ FromCrossJoin <$> fa <*> fb
+             From a -> From b -> From (a:.b)
+crossJoin (From fa) (From fb) = From $ FromCrossJoin <$> fa <*> fb
 
+-- | Treat query as subquery when joining
+-- @
+--     x <- fromTable
+--     y <- subSelect q
+-- @
+-- will turn into
+-- @
+--     SELECT .. FROM x, (SELECT .. from y)
+-- @
 
 subSelect :: (IsExpr a) => Query a -> Query a
 subSelect q = Query $ do
@@ -259,13 +309,13 @@ subSelect q = Query $ do
 
 -- | append to ORDER BY clase
 orderBy :: Sorting -> Query ()
-orderBy f = Query $ do
-  let compiled = compileSorting f
-  lift $ tell mempty { queryStateOrder = Just $ compileSorting f }
+orderBy f = Query . lift $ tell mempty { queryStateOrder = Just $ compileSorting f }
 
+-- | ascend on expression
 ascendOn :: (Expr a) -> Sorting
 ascendOn (Expr a) = Sorting [a <> raw " DESC"]
 
+-- | descend on expression
 descendOn :: Expr t -> Sorting
 descendOn (Expr a) = Sorting [a <> raw " ASC"]
 
@@ -277,13 +327,15 @@ limitTo i = Query . lift $ tell mempty { queryStateLimit = Just i }
 offsetTo :: Int -> Query ()
 offsetTo i = Query . lift $ tell mempty { queryStateOffset = Just i }
 
--- | Execute query
+-- | Execute query and get results
 query :: (IsExpr a, FromRow (FromExpr a)) => Connection -> Query a -> IO [FromExpr a]
 query c q = PG.query c "?" (Only $ finishQuery q)
 
-executeQuery :: IsExpr r => Connection -> Query r -> IO Int64
-executeQuery c q = PG.execute c "?" (Only $ finishQuery q)
+-- | Execute discarding results, returns number of rows modified
+execute :: Connection -> Query r -> IO Int64
+execute c q = PG.execute c "?" (Only $ finishQueryNoRet q)
 
+-- | Format query for previewing
 formatQuery :: IsExpr a => Connection -> Query a -> IO ByteString
 formatQuery c q = PG.formatQuery c "?" (Only $ finishQuery q)
 
@@ -315,10 +367,12 @@ Expr a &&. Expr b = binOpE (plain " AND ") a b
 infixr 2 ||.
 Expr a ||. Expr b = binOpE (plain " OR ") a b
 
+-- | Access field of relation
 (~>) :: (SingI t) => Rel a -> Field a t b -> Expr b
 (Rel r) ~> fld = Expr $ r <> raw "." <> raw "\"" <> raw (fieldColumn fld) <> raw "\""
 (RelAliased r) ~> fld = Expr $ raw "\"" <> r <> raw "__" <> raw (fieldColumn fld) <> raw "\""
 
+-- | like operator
 (~.) :: Expr Text -> Expr Text -> Expr Bool
 (~.) (Expr a) (Expr b) = binOpE (plain " ~ ") a b
 
@@ -351,11 +405,69 @@ instance IsQuery (Inserting r) where
          lift $ tell (mempty {insertWriterFrom = w})
          return r
       f r
+   withUpdate u f = do
+     r <- Inserting $ do
+        (with, expr) <- updateToQuery u
+        nm <- grabName
+        let w = mempty { queryStateWith = Just $ nm <> raw " AS (" <> with <> raw ")"
+                       , queryStateFrom = Just nm }
+        lift $ tell (mempty { insertWriterFrom = w })
+        return expr
+     f r
+
    where_ (Expr r) = Inserting $ do
      lift $ tell mempty {insertWriterFrom = mempty {queryStateWhere = Just r}}
    from f = Inserting $ do
      (r, w) <- prepareFrom f
      lift $ tell (mempty { insertWriterFrom = w })
+     return r
+
+instance IsQuery (Updating r) where
+   with q f = do
+      r <- Updating $ do
+         (r, w) <- prepareWith q
+         lift $ tell (mempty {insertWriterFrom = w})
+         return r
+      f r
+   withUpdate u f = do
+     r <- Updating $ do
+        (with, expr) <- updateToQuery u
+        nm <- grabName
+        let w = mempty { queryStateWith = Just $ nm <> raw " AS (" <> with <> raw ")"
+                       , queryStateFrom = Just nm }
+        lift $ tell (mempty { insertWriterFrom = w })
+        return expr
+     f r
+
+   where_ (Expr r) = Updating $ do
+     lift $ tell mempty {insertWriterFrom = mempty {queryStateWhere = Just r}}
+   from f = Updating $ do
+     (r, w) <- prepareFrom f
+     lift $ tell (mempty { insertWriterFrom = w })
+     return r
+
+instance IsQuery (Deleting r) where
+   with q f = do
+      r <- Deleting $ do
+         (r, w) <- prepareWith q
+         lift $ tell w
+         return r
+      f r
+   withUpdate u f = do
+     r <- Deleting $ do
+        (with, expr) <- updateToQuery u
+        nm <- grabName
+        let w = mempty { queryStateWith = Just $ nm <> raw " AS (" <> with <> raw ")"
+                       , queryStateFrom = Just nm }
+        lift $ tell w
+        return expr
+     f r
+
+   where_ (Expr r) = Deleting $ do
+     lift $ tell mempty {queryStateWhere = Just r}
+   from f = Deleting $ do
+     (r, w) <- prepareFrom f
+     lift $ tell w
      return r
 
 class IsUpdate m where
@@ -375,127 +487,64 @@ f =. (Expr a) = UpdExpr [(fieldColumn f, a)]
 (=.!) :: (SingI t, ToField a) => Field v t a -> a -> UpdExpr v
 (=.!) f e = f =. val e
 
-set :: forall v t a. (SingI t, ToField a) => Field v t a -> Expr a -> UpdExpr v
+set :: SingI t => Field v t a -> Expr a -> UpdExpr v
 set f a = f =. a
 
 setField :: (SingI t, IsUpdate m) => Field v t a -> Expr a -> m v ()
 setField f a = setFields (f =. a)
 
 updateTable :: forall a b. Table a => (Rel a -> Updating a b) -> Update b
-updateTable f = Update $ do
-    nm <- grabName
-    let r = Rel nm
-    compileUpdating nm $ f r
+updateTable f = update (table $ tableName (Proxy :: Proxy a)) f
+
+update :: From (Rel a) -> (Rel a -> Updating a b) -> Update b
+update r f = Update $ do
+  ns <- get
+  let (FromTable nm alias expr, ns') = runState (runFrom r) ns
+  put ns'
+  compileUpdating (nm <> raw " AS " <> alias) $ f expr
+
+insertIntoTable :: forall a b .(Table a) => (Rel a -> Inserting a b) -> Update b
+insertIntoTable f = do
+    insert tn f
   where
-    table = tableName (Proxy :: Proxy a)
-{-
-update :: forall a. (Table a) => (AsExpr (Whole a) -> Expr Bool)
-                     -> UpdExpr a -> Update (Whole a)
-update f (UpdExpr upds) = Update $ do
-  nm <- grabName
-  let tableE = raw (B.append tn " AS ") <> getBuilder nm
-      expr = Expr nm :: Expr (Whole a)
-      Expr wher' = f expr
-  return $ Updating (mkSelector' Nothing expr) { selectWhere = Just $ wher' }
-         (DoUpdate upds) tableE
+    tn = table $ tableName (Proxy :: Proxy a)
+
+insert :: From (Rel a) -> (Rel a -> Inserting a b) -> Update b
+insert r f = Update $ do
+    ns <- get
+    let (FromTable nm _ expr, ns') = runState (runFrom r) ns
+    put ns'
+    compileInserting nm $ f (Rel nm)
+
+delete :: From (Rel a) -> (Rel a -> Deleting a b) -> Update b
+delete r f = Update $ do
+  ns <- get
+  let (FromTable nm alias expr, ns') = runState (runFrom r) ns
+  put ns'
+  compileDeleting (nm <> raw " AS " <> alias) $ f expr
+
+
+deleteFromTable :: forall a b .(Table a) => (Rel a -> Deleting a b) -> Update b
+deleteFromTable f = delete tn f
   where
-    tn = tableName (Proxy :: Proxy a)
+    tn = table $ tableName (Proxy :: Proxy a)
 
-updateFrom :: forall a from. (Table a) => Select from
-                -> (AsExpr (from:. Whole a) -> Expr Bool)
-                -> (AsExpr from -> UpdExpr a) -> Update (Whole a)
-updateFrom (Select mfrom) f fu = Update $ do
-  from' <- mfrom
-  nm <- grabName
-  let fromExpr = selectExpr from'
-      tableE = raw (B.append tn " AS ") <> getBuilder nm
-      expr = Expr nm :: Expr (Whole a)
-      Expr wher' = f (fromExpr :. expr)
-      UpdExpr upds = fu fromExpr
-      where'' = case selectWhere from' of
-        Nothing -> wher'
-        Just w -> RawExpr $ addParens w <> raw " AND " <> addParens wher'
-  return $ Updating (from' { selectExpr = expr,
-                           selectWhere = Just $ where'' } ) (DoUpdate upds) tableE
-  where
-    tn = tableName (Proxy :: Proxy a)
+queryUpdate :: ((FromExpr t) ~ r, IsExpr t, FromRow r) => Connection -> Update t -> IO [r]
+queryUpdate con u = PG.query con "?" (Only $ finishUpdate u)
 
-insert :: forall a . (Table a) => UpdExpr a -> Update (Whole a)
-insert (UpdExpr upds) = Update $ do
-  let tableE = D.singleton $ plain tn
-      expr = Expr (RawTerm $ tableE) :: Expr (Whole a)
-  return $ Updating (mkSelector' Nothing expr) (DoInsert upds) tableE
-  where
-    tn = tableName (Proxy :: Proxy a)
+formatUpdate :: IsExpr t => Connection -> Update t -> IO ByteString
+formatUpdate con u = PG.formatQuery con "?" (Only $ finishUpdate u)
 
-insertFrom :: forall a from. (Table a) => Select from
-           -> (AsExpr from -> UpdExpr a) -> Update (Whole a)
-insertFrom (Select mfrom) fu = Update $ do
-  from' <- mfrom
-  let tableE = D.singleton $ plain tn
-      expr = Expr (RawTerm $ tableE) :: Expr (Whole a)
-      fromExpr = selectExpr from'
-      UpdExpr upds = fu fromExpr
-  return $ Updating (from' { selectExpr = expr } ) (DoInsert upds) tableE
-  where
-    tn = tableName (Proxy :: Proxy a)
+executeUpdate :: Connection -> Update a -> IO Int64
+executeUpdate con u = PG.execute con "?" (Only $ finishUpdateNoRet u)
 
 
-delete :: forall a. (Table a) => (AsExpr (Whole a) -> Expr Bool)
-                    -> Update (Whole a)
-delete f = Update $ do
-  nm <- grabName
-  let tableE = raw (B.append tn " AS ") <> getBuilder nm
-      expr = Expr nm :: Expr (Whole a)
-      Expr wher' = f expr
-  return $ Updating (mkSelector' Nothing expr) { selectWhere = Just $ wher' }
-         DoDelete tableE
-  where
-    tn = tableName (Proxy :: Proxy a)
-
-deleteFrom :: forall a from. (Table a) => Select from
-                -> (AsExpr (from:. Whole a) -> Expr Bool)
-                -> Update (Whole a)
-deleteFrom (Select mfrom) f = Update $ do
-  from' <- mfrom
-  nm <- grabName
-  let fromExpr = selectExpr from'
-      tableE = raw (B.append tn " AS ") <> getBuilder nm
-      expr = Expr nm :: Expr (Whole a)
-      Expr wher' = f (fromExpr :. expr)
-      where'' = case selectWhere from' of
-        Nothing -> wher'
-        Just w -> RawExpr $ addParens w <> raw " AND " <> addParens wher'
-  return $ Updating (from' { selectExpr = expr,
-                           selectWhere = Just $ where'' } ) (DoDelete) tableE
-  where
-    tn = tableName (Proxy :: Proxy a)
-
-returning :: (AsExpr a -> AsExpr b) -> Update a -> Update b
-returning f (Update mu) = Update $ do
-  u <- mu
-  let sel = updatingSelect u
-      exprs = selectExpr sel
-  return $ u { updatingSelect = sel { selectExpr = f exprs } }
-
-queryUpdate :: (FromRow r, IsExpr r) => Connection -> Update r -> IO [r]
-queryUpdate c q = PG.query c "?" (Only $ finishUpdate q)
-
-executeUpdate :: IsExpr r => Connection -> Update r -> IO Int64
-executeUpdate c q = PG.execute c "?" (Only $ finishUpdateNoRet q)
-
-
-formatUpdate :: IsExpr a => Connection -> Update a -> IO ByteString
-formatUpdate c q = PG.formatQuery c "?" (Only $ finishUpdate q)
-
-infixr 7 =., =.!
-(=.) :: forall v t a. (SingI t) => Field v t a -> Expr a -> UpdExpr v
-f =. (Expr a) = UpdExpr [(fieldColumn f, a)]
-
-(=.!) :: (SingI t, ToField a) => Field v t a -> a -> UpdExpr v
-(=.!) f e = f =. val e
-
-setField :: forall v t a. (SingI t, ToField a) => Field v t a -> Expr a -> UpdExpr v
-setField f a = f =. a
--}
+updateToQuery :: (MonadState NameSource m, IsExpr t) => Update t -> m (ExprBuilder, t)
+updateToQuery (Update mu) = do
+  ns <- get
+  let ((expr, upd), ns') = runState mu ns
+  put ns'
+  (proj, expr') <- compileProjection expr
+  let res = upd <> raw " RETURNING " <> proj
+  return (res, expr')
 
