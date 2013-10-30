@@ -201,7 +201,7 @@ import           Database.PostgreSQL.Simple.ToField
 -- @
 --     userRoles2 login = do
 --       r\@(u:.r) <- from \$ innerJoin roles recordTable
---                        \$ \r u -> r~>RoleUserId ==. u~>UserKey
+--                        \$ \\r u -> r~>RoleUserId ==. u~>UserKey
 --       where $ u~>UserLogin ==. val login
 --       return r
 -- @
