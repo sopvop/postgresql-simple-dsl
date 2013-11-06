@@ -16,7 +16,7 @@ module Database.PostgreSQL.Simple.Dsl.Internal
        where
 
 import           Control.Applicative
-import           Control.Monad                        (liftM)
+import           Control.Monad                        (ap, liftM)
 import           Control.Monad.State.Class
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State            (State, StateT, runState,
@@ -42,6 +42,7 @@ import           Database.PostgreSQL.Simple           ((:.) (..), Only (..))
 import           Database.PostgreSQL.Simple.FromField hiding (Field)
 import           Database.PostgreSQL.Simple.FromRow
 import           Database.PostgreSQL.Simple.ToField
+import           Database.PostgreSQL.Simple.ToRow
 
 -- | Wrapper for selecting whole record
 newtype Whole a = Whole { getWhole :: a } deriving (Eq, Ord, Show)
@@ -141,7 +142,9 @@ mkRename s nm = s <> raw " AS " <> nm
 
 class IsExpr a where
   type FromExpr a :: *
-  compileProjection :: MonadState NameSource m => a -> m (ExprBuilder, a)
+  compileProjection :: MonadState NameSource m => a -> m ([ExprBuilder], a)
+  asValues  :: a -> [ExprBuilder]
+  asRenamed :: MonadState NameSource m => a -> m a
 
 instance Record a => IsExpr (Rel a) where
   type FromExpr (Rel a) = Whole a
@@ -150,110 +153,126 @@ instance Record a => IsExpr (Rel a) where
     let projector c = case rel of
          Rel r -> r <> raw ".\"" <> raw c <> raw "\" AS " <> renamed nm c
          RelAliased r -> raw "\""<> renamed r c <> raw "\""
-        proj = mconcat $ intersperse (raw ",") $ map projector columns
-    return (proj, RelAliased nm)
+        proj = map projector columns
+    return (proj, RelAliased nm )
     where
       renamed nm c = nm <> raw "__" <> raw c
       columns = recordColumns $ recordParser (Proxy :: Proxy a)
 
+  asRenamed _ = do
+    nm <- grabName
+    return $ RelAliased nm
+
+  asValues rel = map projector columns
+     where
+       projector c = case rel of
+         Rel r -> r <> raw ".\"" <> raw c <> raw "\""
+         RelAliased r -> raw "\""<> renamed r c <> raw "\""
+       renamed nm c = nm <> raw "__" <> raw c
+       columns = recordColumns $ recordParser (Proxy :: Proxy a)
+
+renameAs :: [ExprBuilder] -> [ExprBuilder] -> [ExprBuilder]
+renameAs srs dsts = [x <> raw " AS " <> y | (x,y) <- zip srs dsts]
+renameIt :: forall t m . (MonadState NameSource m, IsExpr t) => t -> m ([ExprBuilder], t)
+renameIt a = do
+  ren <- asRenamed a
+  return (renameAs (asValues a) (asValues ren), a)
+
 instance IsExpr (Expr (Only a)) where
   type FromExpr (Expr (Only a)) = Only a
-  compileProjection (Expr a) = do
-    nm <- grabName
-    return (mkRename a nm, Expr nm)
-
+  compileProjection = renameIt
+  asValues (Expr a) = [a]
+  asRenamed _ = liftM Expr grabName
 
 instance IsExpr (Expr a, Expr b) where
   type FromExpr (Expr a, Expr b) = (a, b)
-  compileProjection (Expr a, Expr b) = do
-    nm1 <- grabName
-    nm2 <- grabName
-    return $ (mkRename a nm1 <> raw "," <> mkRename b nm2,
-             (Expr nm1, Expr nm2))
+  compileProjection = renameIt
+  asValues (Expr a, Expr b) = [a,b]
+  asRenamed _ = return (,) `ap` grabExpr `ap` grabExpr
 
 instance IsExpr (Expr a, Expr b, Expr c) where
   type FromExpr (Expr a, Expr b, Expr c) = (a, b, c)
-  compileProjection (Expr a, Expr b, Expr c) = do
-    nm1 <- grabName
-    nm2 <- grabName
-    nm3 <- grabName
-    return $ (  mkRename a nm1 <> raw ","
-             <> mkRename b nm2 <> raw ","
-             <> mkRename c nm3,
-             (Expr nm1, Expr nm2, Expr nm3))
+  compileProjection = renameIt
+  asValues (Expr a, Expr b, Expr c) = [a,b,c]
+  asRenamed _ = return (,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr
 
 instance IsExpr (Expr a, Expr b, Expr c, Expr d) where
   type FromExpr (Expr a, Expr b, Expr c, Expr d) = (a, b, c, d)
-  compileProjection (Expr a, Expr b, Expr c, Expr d) = do
-    nm1 <- grabName
-    nm2 <- grabName
-    nm3 <- grabName
-    nm4 <- grabName
-    return $ (  mkRename a nm1 <> raw ","
-             <> mkRename b nm2 <> raw ","
-             <> mkRename c nm3 <> raw ","
-             <> mkRename d nm4,
-             (Expr nm1, Expr nm2, Expr nm3, Expr nm4))
+  compileProjection = renameIt
+  asValues (Expr a, Expr b, Expr c, Expr d) = [a,b,c,d]
+  asRenamed _ = return (,,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr `ap` grabExpr
 
 instance IsExpr (Expr a, Expr b, Expr c, Expr d, Expr e) where
   type FromExpr (Expr a, Expr b, Expr c, Expr d, Expr e) = (a, b, c, d, e)
-  compileProjection (Expr a, Expr b, Expr c, Expr d, Expr e) = do
-    nm1 <- grabName
-    nm2 <- grabName
-    nm3 <- grabName
-    nm4 <- grabName
-    nm5 <- grabName
-    return $ (  mkRename a nm1 <> raw ","
-             <> mkRename b nm2 <> raw ","
-             <> mkRename c nm3 <> raw ","
-             <> mkRename d nm4 <> raw ","
-             <> mkRename e nm5,
-             (Expr nm1, Expr nm2, Expr nm3, Expr nm4, Expr nm5))
+  compileProjection = renameIt
+  asValues (Expr a, Expr b, Expr c, Expr d, Expr e) = [a,b,c,d,e]
+  asRenamed _ = return (,,,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr `ap` grabExpr
+                `ap` grabExpr
 
 instance IsExpr (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) where
   type FromExpr (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) = (a, b, c, d, e, f)
-  compileProjection (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) = do
-    nm1 <- grabName
-    nm2 <- grabName
-    nm3 <- grabName
-    nm4 <- grabName
-    nm5 <- grabName
-    nm6 <- grabName
-    return $ (  mkRename a nm1 <> raw ","
-             <> mkRename b nm2 <> raw ","
-             <> mkRename c nm3 <> raw ","
-             <> mkRename d nm4 <> raw ","
-             <> mkRename e nm5 <> raw ","
-             <> mkRename f nm6,
-             (Expr nm1, Expr nm2, Expr nm3, Expr nm4, Expr nm5, Expr nm6))
+  compileProjection = renameIt
+  asValues (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) = [a,b,c,d,e,f]
+  asRenamed _ = return (,,,,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr `ap` grabExpr
+                `ap` grabExpr `ap` grabExpr
 
 instance IsExpr (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) where
   type FromExpr (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) = (a, b, c, d, e, f, g)
-  compileProjection (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) = do
-    nm1 <- grabName
-    nm2 <- grabName
-    nm3 <- grabName
-    nm4 <- grabName
-    nm5 <- grabName
-    nm6 <- grabName
-    nm7 <- grabName
-    return $ (  mkRename a nm1 <> raw ","
-             <> mkRename b nm2 <> raw ","
-             <> mkRename c nm3 <> raw ","
-             <> mkRename d nm4 <> raw ","
-             <> mkRename e nm5 <> raw ","
-             <> mkRename f nm6 <> raw ","
-             <> mkRename g nm7,
-             (Expr nm1, Expr nm2, Expr nm3, Expr nm4, Expr nm5, Expr nm6, Expr nm7))
-
+  compileProjection = renameIt
+  asValues (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) = [a,b,c,d,e,f,g]
+  asRenamed _ = return (,,,,,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr `ap` grabExpr
+                `ap` grabExpr `ap` grabExpr `ap` grabExpr
 
 instance (IsExpr a, IsExpr b) => IsExpr (a:.b) where
   type FromExpr (a :. b) = (FromExpr a :. FromExpr b)
   compileProjection (a :. b) = do
     (pa, ea) <- compileProjection a
     (pb, eb) <- compileProjection b
-    return (pa <> raw "," <> pb, ea :. eb)
+    return (pa ++ pb, ea :. eb)
+  asValues (a:.b) = asValues a ++ asValues b
+  asRenamed ~(a:.b) = return (:.) `ap` asRenamed a `ap` asRenamed b
 
+class ToRow a => ToExpr a where
+  type AsExpr a :: *
+  toExpr :: a -> AsExpr a
+
+instance ToField a => ToExpr (Only a) where
+  type AsExpr (Only a) = Expr (Only a)
+  toExpr (Only a) = Expr $ rawField a
+instance (ToField a, ToField b) => ToExpr (a,b) where
+  type AsExpr (a,b) = (Expr a, Expr b)
+  toExpr (a,b) = (Expr $ rawField a, Expr $ rawField b)
+
+instance (ToField a, ToField b, ToField c) => ToExpr (a,b,c) where
+  type AsExpr (a,b,c) = (Expr a, Expr b, Expr c)
+  toExpr (a,b,c) = (Expr $ rawField a, Expr $ rawField b, Expr $ rawField c)
+
+instance (ToField a, ToField b, ToField c, ToField d) => ToExpr (a,b,c,d) where
+  type AsExpr (a,b,c,d) = (Expr a, Expr b, Expr c, Expr d)
+  toExpr (a,b,c,d) = (Expr $ rawField a, Expr $ rawField b, Expr $ rawField c,
+                      Expr $ rawField d)
+
+instance (ToField a, ToField b, ToField c, ToField d, ToField e) => ToExpr (a,b,c,d,e) where
+  type AsExpr (a,b,c,d,e) = (Expr a, Expr b, Expr c, Expr d, Expr e)
+  toExpr (a,b,c,d,e) = (Expr $ rawField a, Expr $ rawField b, Expr $ rawField c,
+                       Expr $ rawField d, Expr $ rawField e)
+
+instance (ToField a, ToField b, ToField c, ToField d, ToField e, ToField f)
+         => ToExpr (a,b,c,d,e,f) where
+  type AsExpr (a,b,c,d,e,f) = (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f)
+  toExpr (a,b,c,d,e,f) = (Expr $ rawField a, Expr $ rawField b, Expr $ rawField c,
+                          Expr $ rawField d, Expr $ rawField e, Expr $ rawField f)
+
+instance (ToField a, ToField b, ToField c, ToField d, ToField e, ToField f, ToField g)
+         => ToExpr (a,b,c,d,e,f,g) where
+  type AsExpr (a,b,c,d,e,f,g) = (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g)
+  toExpr (a,b,c,d,e,f,g) = (Expr $ rawField a, Expr $ rawField b, Expr $ rawField c,
+                            Expr $ rawField d, Expr $ rawField e, Expr $ rawField f,
+                            Expr $ rawField g)
+
+instance (ToExpr a, ToExpr b) => ToExpr (a:.b) where
+  type AsExpr (a:.b) = AsExpr a :. AsExpr b
+  toExpr (a:.b) = toExpr a :. toExpr b
 
 {-
 data UpdatingAct = DoUpdate [(ByteString, ExprBuilder)]
@@ -333,18 +352,20 @@ finishUpdateNoRet q = Many . D.toList $ upd
 -}
 
 data QueryState = QueryState
-  { queryStateWith   :: Maybe ExprBuilder
-  , queryStateFrom   :: Maybe ExprBuilder
-  , queryStateWhere  :: Maybe ExprBuilder
-  , queryStateOrder  :: Maybe ExprBuilder
-  , queryStateLimit  :: Maybe Int
-  , queryStateOffset :: Maybe Int
+  { queryStateWith      :: Maybe ExprBuilder
+  , queryStateRecursive :: Any
+  , queryStateFrom      :: Maybe ExprBuilder
+  , queryStateWhere     :: Maybe ExprBuilder
+  , queryStateOrder     :: Maybe ExprBuilder
+  , queryStateLimit     :: Maybe Int
+  , queryStateOffset    :: Maybe Int
   }
 
 instance Monoid QueryState where
-  mempty = QueryState Nothing Nothing Nothing Nothing Nothing Nothing
-  QueryState wa fa wha sa la oa `mappend` QueryState wb fb whb sb lb ob =
+  mempty = QueryState Nothing mempty Nothing Nothing Nothing Nothing Nothing
+  QueryState wa ra fa wha sa la oa `mappend` QueryState wb rb fb whb sb lb ob =
         QueryState (joinWith (raw ",") wa wb)
+                   (ra <> rb)
                    (joinWith (raw ",") fa fb)
                    (joinWith (raw " AND ") wha whb)
                    (joinWith (raw ",") sa sb)
@@ -370,6 +391,9 @@ grabName_ = do
 grabName :: MonadState NameSource m => m (ExprBuilder)
 grabName = liftM (D.singleton . Plain) grabName_
 
+grabExpr :: MonadState NameSource m => m (Expr a)
+grabExpr = liftM Expr grabName
+
 compIt :: MonadState NameSource m => Query t -> m (t, QueryState)
 compIt (Query a) = do
   ns <- get
@@ -377,17 +401,19 @@ compIt (Query a) = do
   put ns'
   return (r,q)
 
-finishIt :: ExprBuilder -> QueryState -> ExprBuilder
+finishIt :: [ExprBuilder] -> QueryState -> ExprBuilder
 finishIt expr q =
-        opt (raw " WITH " `fprepend` queryStateWith q)
-        <> raw "SELECT " <> expr
+        opt (raw withStart `fprepend` queryStateWith q)
+        <> raw "SELECT " <> commaSep expr
         <> opt (raw " FROM "`fprepend` queryStateFrom q)
         <> opt (raw " WHERE " `fprepend` queryStateWhere q)
         <> opt (raw " ORDER BY " `fprepend` queryStateOrder q)
         <> opt (mappend (raw " LIMIT ") . rawField <$> queryStateLimit q)
         <> opt (mappend (raw " OFFSET ") .rawField <$> queryStateOffset q)
-
-compileQuery :: Query ExprBuilder -> QueryM ExprBuilder
+  where
+    withStart = if getAny (queryStateRecursive q) then " WITH RECURSIVE "
+                 else " WITH "
+compileQuery :: Query [ExprBuilder] -> QueryM ExprBuilder
 compileQuery q = do
   (r, q') <- compIt q
   return $ finishIt r q'
@@ -407,7 +433,7 @@ finishQueryNoRet mq = Many $ D.toList res
     res = fst $ runState finisher (NameSource 0)
     finisher = do
       (_, q') <- compIt mq
-      return $ finishIt (raw "true") q'
+      return $ finishIt [raw "true"] q'
 
 whereQ :: Expr t -> Query ()
 whereQ (Expr r) = Query $ do
@@ -418,12 +444,14 @@ type FromM a = State NameSource a
 
 data FromD a where
    FromTable      :: ExprBuilder -> ExprBuilder -> a -> FromD a
+   FromValues     :: ExprBuilder -> ExprBuilder -> ExprBuilder -> a -> FromD a
    FromInnerJoin  :: FromD a -> FromD b -> ExprBuilder -> FromD (a:.b)
    FromCrossJoin  :: FromD a -> FromD b -> FromD (a:.b)
 
 
 fromExpr :: FromD a -> a
 fromExpr (FromTable _ _ a) = a
+fromExpr (FromValues _ _ _ a) = a
 fromExpr (FromInnerJoin a b _) = fromExpr a :. fromExpr b
 fromExpr (FromCrossJoin a b) = fromExpr a :. fromExpr b
 
@@ -432,7 +460,8 @@ newtype From a = From { runFrom :: State NameSource (FromD a) }
 
 compileFrom :: FromD a -> (ExprBuilder, a)
 compileFrom (FromTable bs alias a) = (bs<> raw " AS " <> alias, a)
-
+compileFrom (FromValues bs alias proj a) = (raw "(VALUES "<> bs <> raw ") AS "
+            <> alias <> raw "(" <> proj <> raw ")" , a)
 compileFrom (FromInnerJoin a b cond) = (bld, ea:.eb)
   where
     (ca, ea) = compileFrom a
@@ -477,7 +506,7 @@ compileInserting table (Inserting a) = do
   let ((r, ns'), q) = runWriter (runStateT a ns)
   put ns'
   let (cols, exprs) = unzip $ insertWriterSets q
-      compiledSel = finishIt (commaSep exprs) $ insertWriterFrom q
+      compiledSel = finishIt exprs $ insertWriterFrom q
       res = raw "INSERT INTO "<>table <> raw "(" <> commaSep (map raw cols)
           <> raw ") (" <> compiledSel <> raw ")"
   return (r,res)
@@ -526,7 +555,7 @@ finishUpdate (Update u) = Many . D.toList . fst $ runState (u >>= compiler) (Nam
   where
     compiler (expr, bld) = do
       (proj, _) <- compileProjection expr
-      return $ (bld <> raw " RETURNING "<> proj)
+      return $ (bld <> raw " RETURNING "<> commaSep proj)
 
 finishUpdateNoRet :: Update a -> Action
 finishUpdateNoRet (Update u) = Many . D.toList . snd . fst $ runState u (NameSource 0)
@@ -544,3 +573,7 @@ function bs = Function bs []
 call :: Function a -> Expr a
 call (Function bs args) = Expr  $
    raw bs <> raw "(" <> commaSep args <> raw ")"
+
+data Union = UnionDistinct | UnionAll deriving (Eq, Show, Ord)
+
+data Recursive a = Recursive Union (Query a) (a -> Query a)

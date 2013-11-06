@@ -49,19 +49,18 @@ getEntity c eid = takeOne =<< query c sel
        where_ (idField t ==. val eid)
        return t
 
-updateEntity :: Entity a => Connection -> EntityId a -> UpdExpr a -> IO ()
+updateEntity :: forall a . Entity a => Connection -> EntityId a -> UpdExpr a -> IO ()
 updateEntity c eid upds = void $ executeUpdate c upd
    where
      upd = updateTable $ \t -> do
-          setFields upds
+          setFields upds :: Updating a ()
           where_ $ idField t ==. val eid
 
 insertEntity :: Entity a => Connection -> a -> IO (EntityId a)
 insertEntity c ent = takeOnlyE =<< queryUpdate c ins
    where
-    ins = insertIntoTable $ \r -> do
-        setFields (entityUpdate ent)
-        return $ only $ idField r
+    ins = returning (only . idField)
+          $ insertIntoTable (return $ entityUpdate ent)
 
 deleteEntity :: forall a . Entity a => Connection -> EntityId a -> IO ()
 deleteEntity c eid = void $ executeUpdate c del

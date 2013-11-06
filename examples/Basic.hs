@@ -69,6 +69,18 @@ instance FromRow Role where
 getAllUsers :: Connection -> IO [Whole User]
 getAllUsers c = query c $ fromTable
 
+data AssetClass = AssetClass
+  { classId :: Int
+  , classParent :: Maybe Int
+  } deriving (Show)
+
+instance Record AssetClass where
+  data Field AssetClass t a where
+    ClassKey :: Field AssetClass "id" Int
+    ClassParent :: Field AssetClass "parent_id" (Maybe Int)
+  recordParser _ = AssetClass <$> takeField ClassKey <*> takeField ClassParent
+
+classes = table "asset_class" :: From (Rel AssetClass)
 
 users = table "users" :: From (Rel User)
 roles = table "project_roles" :: From (Rel Role)
@@ -79,7 +91,7 @@ get_class_path e = call . arg e $ function "get_class_path"
 printQ con = putStrLn . B.unpack <=< formatQuery con
 printU con = putStrLn . B.unpack <=< formatUpdate con
 main = do
-  con <- connectPostgreSQL "dbname=testdb user=lonokhov password=batman"
+  con <- connectPostgreSQL "dbname=testdb2 user=lonokhov password=batman"
   return ()
   let qU = do
          x <- from users
@@ -118,3 +130,17 @@ main = do
      x <- from users
      where_ $ x~>UserLogin ==. val "admin"
      return $ only (x~>UserCerebroLogin)
+  let nonrec = do
+        c <- from classes
+        where_ $ c~>ClassKey ==. val 788
+        return c
+  let recur rc = do
+        c <- from classes
+        where_ $ just (c~>ClassKey) ==. (rc~>ClassParent)
+        return c
+  printQ con $ withRecursive (nonrec `union` recur) $ return
+  mapM_ (print . getWhole) <=< query con $ withRecursive (nonrec `union` recur) return
+  let doIns = do
+        (i, nm) <- fromPureValues [(UserId 1, "foo"), (UserId 2, "baz")]
+        return $ RoleName =. nm <> RoleUserId =. i
+  printU con $ insertIntoTable doIns

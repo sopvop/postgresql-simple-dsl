@@ -25,13 +25,22 @@ module Database.PostgreSQL.Simple.Dsl
      , From
      , from
      , table
+     , recordTable
+     , values
+     , pureValues
      , fromTable
+     , fromValues
+     , fromPureValues
      , innerJoin
      , crossJoin
      , subSelect
      -- * With
      , with
      , withUpdate
+     , Recursive
+     , withRecursive
+     , union
+     , unionAll
      -- * Query
      , where_
      , orderBy
@@ -45,9 +54,9 @@ module Database.PostgreSQL.Simple.Dsl
      , Updating
      , update
      , updateTable
-     , Inserting
      , insert
      , insertIntoTable
+     , returning
      , Deleting
      , delete
      , deleteFromTable
@@ -61,11 +70,11 @@ module Database.PostgreSQL.Simple.Dsl
      , executeUpdate
      , formatUpdate
      -- * Expressions
-     , Rel, (~>)
+     , Rel, (~>), (?>)
      , Expr
      , val
      , (==.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
-     , true, false, isNull, isInList
+     , true, false, just, isNull, isInList
      , whole
      , only
      -- * Helpers
@@ -224,10 +233,34 @@ table bs = From $ do
       from' = raw "\"" <> raw bs <> raw "\""
   return $ FromTable from' as (Rel as)
 
+values :: forall a . (IsExpr a) => [a] -> From a
+values inp = From $ do
+   nm <- grabName
+   renamed <- asRenamed (undefined :: a)
+   return $ FromValues body nm (commaSep $ asValues renamed) renamed
+  where
+    body = commaSep $ map packRow inp
+    packRow r = raw "(" <> commaSep (asValues r) <> raw ")"
+
+pureValues :: forall a.(ToExpr a, IsExpr (AsExpr a)) => [a] -> From (AsExpr a)
+pureValues inp = From $ do
+   nm <- grabName
+   renamed <- asRenamed (undefined :: AsExpr a)
+   return $ FromValues body nm (commaSep $ asValues renamed) renamed
+  where
+    body = commaSep $ map packRow inp
+    packRow r = raw "(" <> commaSep (asValues $ toExpr r) <> raw ")"
+
 -- | Start query with table - SELECT table.*
 fromTable :: forall a.(Table a, Record a) => Query (Rel a)
 fromTable = from . table $ tableName (Proxy :: Proxy a)
 
+
+fromValues :: (IsExpr a, IsQuery m) => [a] -> m a
+fromValues = from . values
+
+fromPureValues :: (IsExpr (AsExpr a), IsQuery m, ToExpr a) => [a] -> m (AsExpr a)
+fromPureValues = from . pureValues
 
 instance IsQuery Query where
 --   with :: (IsExpr a, IsExpr b) => Query a -> (a -> Query b) -> Query b
@@ -239,9 +272,9 @@ instance IsQuery Query where
       f r
    withUpdate u f = do
      r <- Query $ do
-        (with, expr) <- updateToQuery u
+        (withQ, expr) <- updateToQuery u
         nm <- grabName
-        lift $ tell mempty { queryStateWith = Just $ nm <> raw " AS (" <> with <> raw ")"
+        lift $ tell mempty { queryStateWith = Just $ nm <> raw " AS (" <> withQ <> raw ")"
                            , queryStateFrom = Just nm }
         return expr
      f r
@@ -288,15 +321,17 @@ crossJoin :: forall a b .(IsExpr a, IsExpr b, Table b) =>
 crossJoin (From fa) (From fb) = From $ FromCrossJoin <$> fa <*> fb
 
 -- | Treat query as subquery when joining
--- @
---     x <- fromTable
---     y <- subSelect q
--- @
--- will turn into
--- @
---     SELECT .. FROM x, (SELECT .. from y)
--- @
-
+-- useful to force evaluation of expressions, othervise volatile
+-- functions will be called every time they are encountered in any expression.
+--
+-- >     x <- fromTable
+-- >     y <- subSelect q
+--
+--   will turn into
+--
+-- >    SELECT .. FROM x, (SELECT .. from y)
+--
+--
 subSelect :: (IsExpr a) => Query a -> Query a
 subSelect q = Query $ do
   (r, q') <- compIt q
@@ -368,9 +403,15 @@ infixr 2 ||.
 Expr a ||. Expr b = binOpE (plain " OR ") a b
 
 -- | Access field of relation
+mkAcc (Rel r) fld = Expr $ r <> raw "." <> raw "\"" <> raw (fieldColumn fld) <> raw "\""
+mkAcc (RelAliased r ) fld = Expr $ raw "\"" <> r <> raw "__" <> raw (fieldColumn fld) <> raw "\""
+
+infixl 9 ~>, ?>
 (~>) :: (SingI t) => Rel a -> Field a t b -> Expr b
-(Rel r) ~> fld = Expr $ r <> raw "." <> raw "\"" <> raw (fieldColumn fld) <> raw "\""
-(RelAliased r) ~> fld = Expr $ raw "\"" <> r <> raw "__" <> raw (fieldColumn fld) <> raw "\""
+(~>) = mkAcc
+
+(?>) :: (SingI t) => Rel (Maybe a) -> Field a t b -> Expr (Maybe b)
+(?>) = mkAcc
 
 -- | like operator
 (~.) :: Expr Text -> Expr Text -> Expr Bool
@@ -395,32 +436,11 @@ true = Expr $ raw "true"
 false :: Expr Bool
 false = Expr $ raw "true"
 
+just :: Expr a -> Expr (Maybe a)
+just (Expr r) = Expr r
+
 isNull :: Expr a -> Expr Bool
 isNull (Expr r) = Expr $ addParens r <> raw " IS NULL"
-
-instance IsQuery (Inserting r) where
-   with q f = do
-      r <- Inserting $ do
-         (r, w) <- prepareWith q
-         lift $ tell (mempty {insertWriterFrom = w})
-         return r
-      f r
-   withUpdate u f = do
-     r <- Inserting $ do
-        (with, expr) <- updateToQuery u
-        nm <- grabName
-        let w = mempty { queryStateWith = Just $ nm <> raw " AS (" <> with <> raw ")"
-                       , queryStateFrom = Just nm }
-        lift $ tell (mempty { insertWriterFrom = w })
-        return expr
-     f r
-
-   where_ (Expr r) = Inserting $ do
-     lift $ tell mempty {insertWriterFrom = mempty {queryStateWhere = Just r}}
-   from f = Inserting $ do
-     (r, w) <- prepareFrom f
-     lift $ tell (mempty { insertWriterFrom = w })
-     return r
 
 instance IsQuery (Updating r) where
    with q f = do
@@ -431,9 +451,9 @@ instance IsQuery (Updating r) where
       f r
    withUpdate u f = do
      r <- Updating $ do
-        (with, expr) <- updateToQuery u
+        (withQ, expr) <- updateToQuery u
         nm <- grabName
-        let w = mempty { queryStateWith = Just $ nm <> raw " AS (" <> with <> raw ")"
+        let w = mempty { queryStateWith = Just $ nm <> raw " AS (" <> withQ <> raw ")"
                        , queryStateFrom = Just nm }
         lift $ tell (mempty { insertWriterFrom = w })
         return expr
@@ -455,9 +475,9 @@ instance IsQuery (Deleting r) where
       f r
    withUpdate u f = do
      r <- Deleting $ do
-        (with, expr) <- updateToQuery u
+        (withQ, expr) <- updateToQuery u
         nm <- grabName
-        let w = mempty { queryStateWith = Just $ nm <> raw " AS (" <> with <> raw ")"
+        let w = mempty { queryStateWith = Just $ nm <> raw " AS (" <> withQ <> raw ")"
                        , queryStateFrom = Just nm }
         lift $ tell w
         return expr
@@ -470,16 +490,6 @@ instance IsQuery (Deleting r) where
      lift $ tell w
      return r
 
-class IsUpdate m where
-  setFields :: UpdExpr t -> m t ()
-
-instance IsUpdate Inserting where
-  setFields (UpdExpr x) = Inserting . lift $ tell (mempty { insertWriterSets = x })
-
-instance IsUpdate Updating where
-  setFields (UpdExpr x) = Updating . lift $ tell (mempty { insertWriterSets = x })
-
-
 infixr 7 =., =.!
 (=.) :: forall v t a. (SingI t) => Field v t a -> Expr a -> UpdExpr v
 f =. (Expr a) = UpdExpr [(fieldColumn f, a)]
@@ -490,8 +500,17 @@ f =. (Expr a) = UpdExpr [(fieldColumn f, a)]
 set :: SingI t => Field v t a -> Expr a -> UpdExpr v
 set f a = f =. a
 
-setField :: (SingI t, IsUpdate m) => Field v t a -> Expr a -> m v ()
+setField :: (SingI t) => Field v t a -> Expr a -> Updating v ()
 setField f a = setFields (f =. a)
+
+setFields :: UpdExpr t -> Updating r ()
+setFields (UpdExpr x) = Updating . lift $ tell (mempty { insertWriterSets = x })
+
+
+returning :: (t -> a) -> Update t -> Update a
+returning f (Update m) = Update $ do
+  (expr,bld) <- m
+  return $ (f expr, bld)
 
 updateTable :: forall a b. Table a => (Rel a -> Updating a b) -> Update b
 updateTable f = update (table $ tableName (Proxy :: Proxy a)) f
@@ -503,19 +522,29 @@ update r f = Update $ do
   put ns'
   compileUpdating (nm <> raw " AS " <> alias) $ f expr
 
-insertIntoTable :: forall a b .(Table a) => (Rel a -> Inserting a b) -> Update b
+insert :: From (Rel a) -> Query (UpdExpr a) -> Update (Rel a)
+insert r mq = Update $ do
+  ns <- get
+  let (FromTable nm _ _, ns') = runState (runFrom r) ns
+      rel = Rel nm
+  put ns'
+  (UpdExpr upd, q) <- compIt mq
+  let inserting = Inserting $ do
+        lift $ tell $ InsertWriter q upd
+        return rel
+  compileInserting nm $ inserting
+
+
+insertIntoTable :: forall a .(Table a) => Query (UpdExpr a) -> Update (Rel a)
 insertIntoTable f = do
     insert tn f
   where
     tn = table $ tableName (Proxy :: Proxy a)
 
-insert :: From (Rel a) -> (Rel a -> Inserting a b) -> Update b
-insert r f = Update $ do
-    ns <- get
-    let (FromTable nm _ expr, ns') = runState (runFrom r) ns
-    put ns'
-    compileInserting nm $ f (Rel nm)
-
+-- | Delete row from given table
+-- > delete (from users) $ \u -> where & u~>UserKey ==. val uid
+-- turns into
+-- > DELETE FROM users WHERE id ==. 42
 delete :: From (Rel a) -> (Rel a -> Deleting a b) -> Update b
 delete r f = Update $ do
   ns <- get
@@ -523,7 +552,8 @@ delete r f = Update $ do
   put ns'
   compileDeleting (nm <> raw " AS " <> alias) $ f expr
 
-
+-- | Same as above but table is taken from table class
+-- > deleteFromTable $ \u -> where & u~>UserKey ==. val uid
 deleteFromTable :: forall a b .(Table a) => (Rel a -> Deleting a b) -> Update b
 deleteFromTable f = delete tn f
   where
@@ -545,6 +575,45 @@ updateToQuery (Update mu) = do
   let ((expr, upd), ns') = runState mu ns
   put ns'
   (proj, expr') <- compileProjection expr
-  let res = upd <> raw " RETURNING " <> proj
+  let res = upd <> raw " RETURNING " <> commaSep proj
   return (res, expr')
 
+
+withRecursive :: (IsExpr a) =>  Recursive a -> (a -> Query b) -> Query b
+withRecursive (Recursive un q f) ff = compileUnion un q f >>= ff
+
+union :: Query a -> (a -> Query a) -> Recursive a
+union = Recursive UnionDistinct
+
+unionAll :: Query a -> (a -> Query a) -> Recursive a
+unionAll = Recursive UnionAll
+
+compileUnion :: (IsExpr a) => Union -> Query a -> (a -> Query a) -> Query a
+compileUnion un q f = Query $ do
+   nm <- grabName
+   (exprNonRec, queryNonRec) <- compIt q
+   (projNonRec, renamedNonRec) <- compileProjection exprNonRec
+   let (Query recurs) = f renamedNonRec
+   (exprRec, queryRec) <- compIt . Query $ do
+     lift $ tell mempty {queryStateFrom = Just nm}
+     recurs
+   (projRec, _ ) <- compileProjection exprRec
+   let bld = nm <> raw " AS (" <> finishIt projNonRec queryNonRec
+           <> unioner <> finishIt projRec queryRec <> raw " )"
+   lift $ tell mempty { queryStateFrom = Just nm, queryStateRecursive = Any True
+                      , queryStateWith = Just bld }
+   return renamedNonRec
+   where
+     unioner = case un of
+         UnionDistinct -> raw " UNION "
+         UnionAll      -> raw " UNION ALL "
+{-# INLINE compileUnion #-}
+{-
+prepareWith :: (MonadState NameSource m, IsExpr t) => Query t -> m (t, QueryState)
+prepareWith q = do
+   (r, q') <- compIt q
+   nm <- grabName
+   (proj, r') <- compileProjection r
+   let bld = nm  <> raw " AS (" <> finishIt proj q' <> raw ")"
+   return (r', mempty { queryStateWith = Just bld, queryStateFrom = Just nm  })
+-}
