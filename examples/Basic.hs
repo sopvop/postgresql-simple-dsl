@@ -59,9 +59,11 @@ instance Record Role where
   data Field Role t a where
     RoleUserId :: Field Role "user_id" UserId
     RoleName   :: Field Role "role" ByteString
+    RoleProjectId :: Field Role "project_id" Int
 
   recordParser _ = Role <$> takeField RoleUserId
                         <*> takeField RoleName
+                        <* takeField RoleProjectId
 
 instance FromRow Role where
   fromRow = recordRowParser $ recordParser (undefined :: Proxy Role)
@@ -103,12 +105,28 @@ main = do
   let adminQ = do u <- from users
                   where_ $ u~>UserLogin ==. val "oleg"
                   return u
-  let qUr = with adminQ $ \usr -> do
+  let qUr = with adminQ $ \wusr -> do
+                 usr <- from wusr
                  r <- from roles
                  where_ $ usr~>UserKey ==. r~>RoleUserId
                  return r
   printQ con qUr
   query con qUr
+  let ups = insertIntoTable
+       $ withUpdate (updateTable $ \t -> do
+                             setFields (RoleName =. val "project_admin")
+                             where_ $ t~>RoleUserId ==. val (UserId 1)
+                                     &&. t~>RoleProjectId ==. val 1
+                             return t)
+       $ \fupd -> do
+           ex <- exists $ from fupd
+           where_ $ not_ ex
+           return $ mconcat
+               [ RoleName =. val "project_admin"
+               , RoleUserId =. val (UserId 1)
+               , RoleProjectId =. val 1 ]
+  printU con ups
+  mapM_ print <=< queryUpdate con $ ups
   let qUrr = do x <- subSelect $ do
                        u <- from users
                        where_ (u~>UserLogin ==. val "oleg")
@@ -144,3 +162,11 @@ main = do
         (i, nm) <- fromPureValues [(UserId 1, "foo"), (UserId 2, "baz")]
         return $ RoleName =. nm <> RoleUserId =. i
   printU con $ insertIntoTable doIns
+  let agg = do
+       r@(pid, _, _) <- fromTable
+         & aggregate (\r -> (groupBy (r~>RoleProjectId), groupBy (r~>RoleName), countAll ))
+       orderBy $ descendOn pid
+       return r
+  printQ con $ agg
+  mapM_ print <=< query con $ agg
+
