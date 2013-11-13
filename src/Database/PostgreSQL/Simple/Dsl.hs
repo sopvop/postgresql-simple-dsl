@@ -108,25 +108,31 @@ module Database.PostgreSQL.Simple.Dsl
      , groupBy
      ) where
 import           Control.Applicative
+import           Control.Exception
 import           Control.Monad.State.Class
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State               (runState)
 import           Control.Monad.Trans.Writer
 
-import           Blaze.ByteString.Builder.ByteString     as B
+import           Blaze.ByteString.Builder                as B
 import           Data.ByteString                         (ByteString)
 import qualified Data.DList                              as D
+import           Data.Foldable                           (foldlM)
 import           Data.Int                                (Int64)
 import           Data.List                               (intersperse)
+import           Data.Maybe
 import           Data.Monoid
 import           Data.Proxy                              (Proxy (..))
 import           Data.Text                               (Text)
 import           Data.Vector                             (Vector)
+import qualified Database.PostgreSQL.LibPQ               as PQ
 import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
                                                           FromRow, Only (..))
 import qualified Database.PostgreSQL.Simple              as PG
 import           Database.PostgreSQL.Simple.Dsl.Internal
+import qualified Database.PostgreSQL.Simple.Internal     as PG
 import           Database.PostgreSQL.Simple.ToField
+import qualified Database.PostgreSQL.Simple.Types        as PG
 import           GHC.TypeLits                            (SingI)
 
 -- $use
@@ -411,7 +417,7 @@ offsetTo i = Query . lift $ tell mempty { queryStateOffset = Just i }
 
 -- | Execute query and get results
 query :: (IsRecord a, FromRow (FromRecord a)) => Connection -> Query a -> IO [FromRecord a]
-query c q = PG.query c "?" (Only $ finishQuery q)
+query c q = buildQuery c (finishQuery q) >>= PG.query_ c . PG.Query
 
 -- | Execute discarding results, returns number of rows modified
 execute :: Connection -> Query r -> IO Int64
@@ -419,7 +425,7 @@ execute c q = PG.execute c "?" (Only $ finishQueryNoRet q)
 
 -- | Format query for previewing
 formatQuery :: IsRecord a => Connection -> Query a -> IO ByteString
-formatQuery c q = PG.formatQuery c "?" (Only $ finishQuery q)
+formatQuery c q = buildQuery c (finishQuery q)
 
 -- | lift value to Expr
 val :: (ToField a ) => a -> Expr a
@@ -703,3 +709,27 @@ countAll = ExprAgg (raw "count(*)")
 
 count :: Expr a -> ExprA Int64
 count (Expr a) = ExprAgg $ raw "count(" <> a <> raw ")"
+
+
+checkError :: PQ.Connection -> Maybe a -> IO a
+checkError _ (Just x) = return x
+checkError c Nothing  = PQ.errorMessage c >>= throwIO . PG.fatalError . fromMaybe "FatalError"
+
+escapeStringConn :: Connection -> ByteString -> IO ByteString
+escapeStringConn conn s =
+    PG.withConnection conn $ \c ->
+    PQ.escapeStringConn c s >>= checkError c
+
+escapeByteaConn :: Connection -> ByteString -> IO ByteString
+escapeByteaConn conn s =
+    PG.withConnection conn $ \c ->
+    PQ.escapeByteaConn c s >>= checkError c
+
+buildQuery :: Connection -> [Action] -> IO ByteString
+buildQuery conn q = B.toByteString <$> foldlM sub mempty q
+  where
+    sub acc (Plain b)       = pure $ acc <> b
+    sub acc (Escape s)      = (mappend acc . quote) <$> escapeStringConn conn s
+    sub acc (EscapeByteA s) = (mappend acc . quote) <$> escapeByteaConn conn s
+    sub acc (Many xs)       = foldlM sub acc xs
+    quote = inQuotes . B.fromByteString

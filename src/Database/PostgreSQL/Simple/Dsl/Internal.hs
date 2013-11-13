@@ -379,23 +379,23 @@ finishIt expr q = finishItAgg expr Nothing q
 finishItAgg :: [ExprBuilder] -> Maybe ExprBuilder -> QueryState -> ExprBuilder
 finishItAgg expr groupBy q =
         opt (raw withStart `fprepend` queryStateWith q)
-        <> raw "SELECT " <> commaSep expr
-        <> opt (raw " FROM "`fprepend` queryStateFrom q)
-        <> opt (raw " WHERE " `fprepend` queryStateWhere q)
-        <> opt (raw " ORDER BY " `fprepend` queryStateOrder q)
-        <> opt (raw " GROUP BY " `fprepend` groupBy)
-        <> opt (mappend (raw " LIMIT ") . rawField <$> queryStateLimit q)
-        <> opt (mappend (raw " OFFSET ") .rawField <$> queryStateOffset q)
+        <> raw "\nSELECT " <> commaSep expr
+        <> opt (raw "\nFROM "`fprepend` queryStateFrom q)
+        <> opt (raw "\nWHERE " `fprepend` queryStateWhere q)
+        <> opt (raw "\nORDER BY " `fprepend` queryStateOrder q)
+        <> opt (raw "\nGROUP BY " `fprepend` groupBy)
+        <> opt (mappend (raw "\nLIMIT ") . rawField <$> queryStateLimit q)
+        <> opt (mappend (raw "\nOFFSET ") .rawField <$> queryStateOffset q)
   where
-    withStart = if getAny (queryStateRecursive q) then " WITH RECURSIVE "
-                 else " WITH "
+    withStart = if getAny (queryStateRecursive q) then "\nWITH RECURSIVE "
+                 else "\nWITH "
 compileQuery :: Query [ExprBuilder] -> QueryM ExprBuilder
 compileQuery q = do
   (r, q') <- compIt q
   return $ finishIt r q'
 
-finishQuery :: IsRecord a => Query a -> Action
-finishQuery mq = Many $ D.toList res
+finishQuery :: IsRecord a => Query a -> [Action]
+finishQuery mq = D.toList res
   where
     res = fst $ runState finisher (NameSource 0)
     finisher = do
@@ -439,9 +439,9 @@ compileFrom (FromInnerJoin a b cond) = (bld, ea:.eb)
   where
     (ca, ea) = compileFrom a
     (cb, eb) = compileFrom b
-    bld = ca <> raw " INNER JOIN " <> cb <> raw " ON " <> cond
+    bld = ca <> raw "\nINNER JOIN " <> cb <> raw " ON " <> cond
 
-compileFrom (FromCrossJoin a b) = (ca <> raw " CROSS JOIN " <> cb, ea:.eb)
+compileFrom (FromCrossJoin a b) = (ca <> raw "\nCROSS JOIN " <> cb, ea:.eb)
   where
     (ca, ea) = compileFrom a
     (cb, eb) = compileFrom b
@@ -483,8 +483,8 @@ compileInserting table (Inserting a) = do
       sel = insertWriterFrom q
       withPart = queryStateWith sel
       compiledSel = finishIt exprs $ sel { queryStateWith = Nothing }
-      res = opt (raw "WITH " `fprepend` withPart)
-          <> raw "INSERT INTO "<>table <> raw "(" <> commaSep (map raw cols)
+      res = opt (raw "\nWITH " `fprepend` withPart)
+          <> raw "\nINSERT INTO "<>table <> raw "(" <> commaSep (map raw cols)
           <> raw ") (" <> compiledSel <> raw ")"
   return (r,res)
 
@@ -495,11 +495,11 @@ newtype Updating r a = Updating {
 
 finishUpdating :: [(ByteString, ExprBuilder)] -> ExprBuilder -> QueryState -> ExprBuilder
 finishUpdating setters table q =
-        opt (raw " WITH " `fprepend` queryStateWith q)
-        <> raw "UPDATE "<> table
-        <> raw " SET " <> sets
-        <> opt (raw " FROM "`fprepend` queryStateFrom q)
-        <> opt (raw " WHERE " `fprepend` queryStateWhere q)
+        opt (raw "\nWITH " `fprepend` queryStateWith q)
+        <> raw "\nUPDATE "<> table
+        <> raw "\nSET " <> sets
+        <> opt (raw "\nFROM "`fprepend` queryStateFrom q)
+        <> opt (raw "\nWHERE " `fprepend` queryStateWhere q)
   where
     (columns, exprs) = unzip setters
     sets = raw "(" <> commaSep (map raw columns) <> raw ")=(" <> commaSep exprs <> raw ")"
@@ -519,10 +519,10 @@ newtype Deleting t a = Deleting { runDeleting :: QueryM a}
 compileDeleting :: MonadState NameSource m => ExprBuilder -> Deleting t a -> m (a, ExprBuilder)
 compileDeleting table (Deleting x) = do
   (expr, q) <- compIt (Query x)
-  let res = opt (raw " WITH " `fprepend` queryStateWith q)
-        <> raw "DELETE FROM "<> table
-        <> opt (raw " USING "`fprepend` queryStateFrom q)
-        <> opt (raw " WHERE " `fprepend` queryStateWhere q)
+  let res = opt (raw "\nWITH " `fprepend` queryStateWith q)
+        <> raw "\nDELETE FROM "<> table
+        <> opt (raw "\nUSING "`fprepend` queryStateFrom q)
+        <> opt (raw "\nWHERE " `fprepend` queryStateWhere q)
   return (expr, res)
 
 newtype Update a = Update { runUpdate :: State NameSource (a, ExprBuilder) }
@@ -531,7 +531,7 @@ finishUpdate :: IsRecord t => Update t -> Action
 finishUpdate (Update u) = Many . D.toList . fst $ runState (u >>= compiler) (NameSource 0)
   where
     compiler (expr, bld) = do
-      return $ bld <> raw " RETURNING "<> commaSep (asValues expr)
+      return $ bld <> raw "\nRETURNING "<> commaSep (asValues expr)
 
 finishUpdateNoRet :: Update a -> Action
 finishUpdateNoRet (Update u) = Many . D.toList . snd . fst $ runState u (NameSource 0)
