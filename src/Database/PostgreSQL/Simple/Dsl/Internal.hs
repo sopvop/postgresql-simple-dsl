@@ -317,8 +317,12 @@ instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f, Expr
   compileGroupBy (a,b,c,d,e,f,g) = catMaybes [compAgg a, compAgg b, compAgg c, compAgg d
                                              ,compAgg e, compAgg f, compAgg g]
 
+
+data Distinct = DistinctAll | Distinct | DistinctOn ExprBuilder
+
 data QueryState = QueryState
   { queryStateWith      :: Maybe ExprBuilder
+  , queryStateDistinct  :: Last Distinct
   , queryStateRecursive :: Any
   , queryStateFrom      :: Maybe ExprBuilder
   , queryStateWhere     :: Maybe ExprBuilder
@@ -328,9 +332,10 @@ data QueryState = QueryState
   }
 
 instance Monoid QueryState where
-  mempty = QueryState Nothing mempty Nothing Nothing Nothing Nothing Nothing
-  QueryState wa ra fa wha sa la oa `mappend` QueryState wb rb fb whb sb lb ob =
+  mempty = QueryState Nothing mempty mempty Nothing Nothing Nothing Nothing Nothing
+  QueryState wa da ra fa wha sa la oa `mappend` QueryState wb db rb fb whb sb lb ob =
         QueryState (joinWith (raw ",") wa wb)
+                   (da <> db)
                    (ra <> rb)
                    (joinWith (raw ",") fa fb)
                    (joinWith (raw " AND ") wha whb)
@@ -379,7 +384,7 @@ finishIt expr q = finishItAgg expr Nothing q
 finishItAgg :: [ExprBuilder] -> Maybe ExprBuilder -> QueryState -> ExprBuilder
 finishItAgg expr groupBy q =
         opt (raw withStart `fprepend` queryStateWith q)
-        <> raw "\nSELECT " <> commaSep expr
+        <> raw "\nSELECT " <> opt (distinct <$> getLast (queryStateDistinct q)) <> commaSep expr
         <> opt (raw "\nFROM "`fprepend` queryStateFrom q)
         <> opt (raw "\nWHERE " `fprepend` queryStateWhere q)
         <> opt (raw "\nORDER BY " `fprepend` queryStateOrder q)
@@ -387,6 +392,10 @@ finishItAgg expr groupBy q =
         <> opt (mappend (raw "\nLIMIT ") . rawField <$> queryStateLimit q)
         <> opt (mappend (raw "\nOFFSET ") .rawField <$> queryStateOffset q)
   where
+    distinct d = case d of
+      DistinctAll -> raw "ALL "
+      Distinct -> raw "DISTINCT "
+      DistinctOn e -> raw "DISTINCT ON (" <> e <> raw ") "
     withStart = if getAny (queryStateRecursive q) then "\nWITH RECURSIVE "
                  else "\nWITH "
 compileQuery :: Query [ExprBuilder] -> QueryM ExprBuilder
@@ -449,6 +458,8 @@ compileFrom (FromCrossJoin a b) = (ca <> raw "\nCROSS JOIN " <> cb, ea:.eb)
 newtype Sorting = Sorting [ExprBuilder]
   deriving (Monoid)
 
+sortingEmpty (Sorting []) = True
+sortingEmpty _ = False
 compileSorting :: Sorting -> ExprBuilder
 compileSorting (Sorting r) = mconcat $ intersperse (raw ",") r
 
@@ -556,3 +567,4 @@ callAgg (Function bs args) = ExprAgg $
 data Union = UnionDistinct | UnionAll deriving (Eq, Show, Ord)
 
 data Recursive a = Recursive Union (Query a) (a -> Query a)
+

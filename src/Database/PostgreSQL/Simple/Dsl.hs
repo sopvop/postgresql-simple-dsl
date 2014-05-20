@@ -1,11 +1,11 @@
-{-# LANGUAGE DataKinds                 #-}
-{-# LANGUAGE FlexibleContexts          #-}
-{-# LANGUAGE MultiParamTypeClasses     #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
-{-# LANGUAGE OverloadedStrings         #-}
-{-# LANGUAGE ScopedTypeVariables       #-}
-{-# LANGUAGE TypeFamilies              #-}
-{-# LANGUAGE TypeOperators             #-}
+{-# LANGUAGE BangPatterns          #-}
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TypeFamilies          #-}
+{-# LANGUAGE TypeOperators         #-}
 module Database.PostgreSQL.Simple.Dsl
      (
      -- * Example of usage
@@ -46,11 +46,14 @@ module Database.PostgreSQL.Simple.Dsl
      , unionAll
      -- * Query
      , where_
+     , Sorting
      , orderBy
      , ascendOn
      , descendOn
      , limitTo
      , offsetTo
+     , distinct
+     , distinctOn
      -- * Updates
      , Update
      , UpdExpr
@@ -109,6 +112,7 @@ module Database.PostgreSQL.Simple.Dsl
      ) where
 import           Control.Applicative
 import           Control.Exception
+import           Control.Monad                           (foldM)
 import           Control.Monad.State.Class
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State               (runState)
@@ -117,7 +121,6 @@ import           Control.Monad.Trans.Writer
 import           Blaze.ByteString.Builder                as B
 import           Data.ByteString                         (ByteString)
 import qualified Data.DList                              as D
-import           Data.Foldable                           (foldlM)
 import           Data.Int                                (Int64)
 import           Data.List                               (intersperse)
 import           Data.Maybe
@@ -361,6 +364,10 @@ crossJoin :: forall a b .(IsRecord a, IsRecord b, Table b) =>
              From a -> From b -> From (a:.b)
 crossJoin (From fa) (From fb) = From $ FromCrossJoin <$> fa <*> fb
 
+
+namedRow :: IsRecord a => ExprBuilder -> a -> ExprBuilder
+namedRow nm r = nm <> raw "(" <> commaSep (asValues r) <> raw ")"
+
 -- | Treat query as subquery when joining
 -- useful to force evaluation of expressions, othervise volatile
 -- functions will be called every time they are encountered in any expression.
@@ -373,9 +380,6 @@ crossJoin (From fa) (From fb) = From $ FromCrossJoin <$> fa <*> fb
 -- >    SELECT .. FROM x, (SELECT .. from y)
 --
 --
-
-namedRow :: IsRecord a => ExprBuilder -> a -> ExprBuilder
-namedRow nm r = nm <> raw "(" <> commaSep (asValues r) <> raw ")"
 
 subSelect :: (IsRecord a) => Query a -> Query a
 subSelect mq = Query $ do
@@ -397,7 +401,8 @@ exists mq = Query $ do
 
 -- | append to ORDER BY clase
 orderBy :: Sorting -> Query ()
-orderBy f = Query . lift $ tell mempty { queryStateOrder = Just $ compileSorting f }
+orderBy f = if sortingEmpty f then return ()
+            else Query . lift $ tell mempty { queryStateOrder = Just $ compileSorting f }
 
 -- | ascend on expression
 ascendOn :: (Expr a) -> Sorting
@@ -414,6 +419,13 @@ limitTo i = Query . lift $ tell mempty { queryStateLimit = Just i }
 -- | set OFFSET
 offsetTo :: Int -> Query ()
 offsetTo i = Query . lift $ tell mempty { queryStateOffset = Just i }
+
+distinct :: Query ()
+distinct = Query . lift $ tell mempty { queryStateDistinct = Last (Just Distinct) }
+
+distinctOn :: Expr t -> Query ()
+distinctOn (Expr e) = Query . lift $
+           tell mempty { queryStateDistinct = Last . Just $ DistinctOn e }
 
 -- | Execute query and get results
 query :: (IsRecord a, FromRow (FromRecord a)) => Connection -> Query a -> IO [FromRecord a]
@@ -726,10 +738,10 @@ escapeByteaConn conn s =
     PQ.escapeByteaConn c s >>= checkError c
 
 buildQuery :: Connection -> [Action] -> IO ByteString
-buildQuery conn q = B.toByteString <$> foldlM sub mempty q
+buildQuery conn q = B.toByteString <$> foldM sub mempty q
   where
-    sub acc (Plain b)       = pure $ acc <> b
-    sub acc (Escape s)      = (mappend acc . quote) <$> escapeStringConn conn s
-    sub acc (EscapeByteA s) = (mappend acc . quote) <$> escapeByteaConn conn s
-    sub acc (Many xs)       = foldlM sub acc xs
+    sub !acc (Plain b)       = pure $ acc <> b
+    sub !acc (Escape s)      = (mappend acc . quote) <$> escapeStringConn conn s
+    sub !acc (EscapeByteA s) = (mappend acc . quote) <$> escapeByteaConn conn s
+    sub !acc (Many xs)       = foldM sub acc xs
     quote = inQuotes . B.fromByteString
