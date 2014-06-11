@@ -1,11 +1,7 @@
-{-# LANGUAGE DataKinds                  #-}
-{-# LANGUAGE FlexibleContexts           #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE OverloadedStrings          #-}
-{-# LANGUAGE ScopedTypeVariables        #-}
-{-# LANGUAGE StandaloneDeriving         #-}
-{-# LANGUAGE TypeFamilies               #-}
-{-# LANGUAGE UndecidableInstances       #-}
+{-# LANGUAGE FlexibleContexts       #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE ScopedTypeVariables    #-}
+{-# LANGUAGE TypeFamilies           #-}
 
 
 module Database.PostgreSQL.Simple.Dsl.Entity
@@ -65,5 +61,7 @@ insertEntity c ent = takeOnlyE =<< queryUpdate c ins
 deleteEntity :: forall a . Entity a => Connection -> EntityId a -> IO ()
 deleteEntity c eid = void $ executeUpdate c del
   where
-    del = deleteFromTable $ \(r :: Rel a) -> do
-       where_ $ idField r ==. val eid
+    del = deleteFromTable $ wh
+    wh :: Rel a -> Deleting a b
+    wh r = where_ $ idField r ==. val eid
+

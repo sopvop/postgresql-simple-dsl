@@ -36,19 +36,13 @@ import           Blaze.ByteString.Builder             (Builder)
 import           Blaze.ByteString.Builder.ByteString  as B
 import           Blaze.ByteString.Builder.Char8       as B
 
-import           GHC.TypeLits                         (Sing, SingI, Symbol,
-                                                       fromSing, sing)
+import           GHC.TypeLits                         (KnownSymbol, Symbol,
+                                                       symbolVal)
 
 import           Database.PostgreSQL.Simple           ((:.) (..), Only (..))
-import           Database.PostgreSQL.Simple.FromField hiding (Field)
-import           Database.PostgreSQL.Simple.FromRow
+import           Database.PostgreSQL.Simple.FromField as PG hiding (Field)
+import           Database.PostgreSQL.Simple.FromRow   as PG
 import           Database.PostgreSQL.Simple.ToField
-
--- | Wrapper for selecting whole record
-newtype Whole a = Whole { getWhole :: a } deriving (Eq, Ord, Show)
-
-instance Record a => FromRow (Whole a) where
-  fromRow = fmap Whole . recordRowParser $ recordParser (Proxy :: Proxy a)
 
 -- | Parser for entities with columns
 data RecordParser v a = RecordParser
@@ -75,14 +69,14 @@ class Record v where
 class Record v =>Table v where
   tableName :: Proxy v -> ByteString
 
-fieldSym :: SingI t => Field v t a -> Sing (t::Symbol)
-fieldSym _ = sing
+fieldSym :: KnownSymbol t => Field v t a -> Proxy (t::Symbol)
+fieldSym _ = Proxy
 
-fieldColumn :: SingI t => Field v t a -> ByteString
-fieldColumn f = B.pack . fromSing $ fieldSym f
+fieldColumn :: KnownSymbol t => Field v t a -> ByteString
+fieldColumn f = B.pack . symbolVal $ fieldSym f
 
 -- | Parse named field
-takeField :: (SingI f, FromField a) => (Field v f a) -> RecordParser v a
+takeField :: (KnownSymbol f, FromField a) => (Field v f a) -> RecordParser v a
 takeField f = RecordParser ([fieldColumn f]) field
 
 type ExprBuilder = DList Action
@@ -159,8 +153,11 @@ class IsRecord a where
   asValues  :: a -> [ExprBuilder]
   asRenamed :: MonadState NameSource m => a -> m a
 
+class IsRecord a => ParseRecord a where
+  rowParser :: a -> RowParser (FromRecord a)
+
 instance Record a => IsRecord (Rel a) where
-  type FromRecord (Rel a) = Whole a
+  type FromRecord (Rel a) = a
   asRenamed (RelTable nm) = do
     nm' <- grabAlias nm
     return $ RelAliased nm'
@@ -168,25 +165,41 @@ instance Record a => IsRecord (Rel a) where
   asRenamed a = return a
   asValues rel = map (mkAccess rel) . recordColumns $ recordParser (Proxy :: Proxy a)
 
+instance Record a => ParseRecord (Rel a) where
+  rowParser _ = recordRowParser $ recordParser (Proxy :: Proxy a)
+
 instance IsRecord (Expr (Only a)) where
-  type FromRecord (Expr (Only a)) = Only a
+  type FromRecord (Expr (Only a)) = a
   asValues (Expr a) = [a]
   asRenamed _ = liftM Expr grabName
+
+instance FromField a => ParseRecord (Expr (Only a)) where
+  rowParser _ = field
 
 instance IsRecord (Expr a, Expr b) where
   type FromRecord (Expr a, Expr b) = (a, b)
   asValues (Expr a, Expr b) = [a,b]
   asRenamed _ = return (,) `ap` grabExpr `ap` grabExpr
 
+instance (FromField a, FromField b) => ParseRecord (Expr a, Expr b) where
+  rowParser _ = fromRow
+
 instance IsRecord (Expr a, Expr b, Expr c) where
   type FromRecord (Expr a, Expr b, Expr c) = (a, b, c)
   asValues (Expr a, Expr b, Expr c) = [a,b,c]
   asRenamed _ = return (,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr
 
+instance (FromField a, FromField b, FromField c) => ParseRecord (Expr a, Expr b, Expr c) where
+  rowParser _ = fromRow
+
 instance IsRecord (Expr a, Expr b, Expr c, Expr d) where
   type FromRecord (Expr a, Expr b, Expr c, Expr d) = (a, b, c, d)
   asValues (Expr a, Expr b, Expr c, Expr d) = [a,b,c,d]
   asRenamed _ = return (,,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr `ap` grabExpr
+
+instance (FromField a, FromField b, FromField c, FromField d)
+         => ParseRecord (Expr a, Expr b, Expr c, Expr d) where
+  rowParser _ = fromRow
 
 instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e) where
   type FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e) = (a, b, c, d, e)
@@ -194,11 +207,19 @@ instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e) where
   asRenamed _ = return (,,,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr `ap` grabExpr
                 `ap` grabExpr
 
+instance (FromField a, FromField b, FromField c, FromField d, FromField e)
+         => ParseRecord (Expr a, Expr b, Expr c, Expr d, Expr e) where
+  rowParser _ = fromRow
+
 instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) where
   type FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) = (a, b, c, d, e, f)
   asValues (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) = [a,b,c,d,e,f]
   asRenamed _ = return (,,,,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr `ap` grabExpr
                 `ap` grabExpr `ap` grabExpr
+
+instance (FromField a, FromField b, FromField c, FromField d, FromField e, FromField f)
+         => ParseRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) where
+  rowParser _ = fromRow
 
 instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) where
   type FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g)
@@ -207,10 +228,17 @@ instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) where
   asRenamed _ = return (,,,,,,) `ap` grabExpr `ap` grabExpr `ap` grabExpr `ap` grabExpr
                 `ap` grabExpr `ap` grabExpr `ap` grabExpr
 
+instance (FromField a, FromField b, FromField c, FromField d, FromField e, FromField f, FromField g)
+         => ParseRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) where
+  rowParser _ = fromRow
+
 instance (IsRecord a, IsRecord b) => IsRecord (a:.b) where
   type FromRecord (a :. b) = (FromRecord a :. FromRecord b)
   asValues (a:.b) = asValues a ++ asValues b
   asRenamed ~(a:.b) = return (:.) `ap` asRenamed a `ap` asRenamed b
+
+instance (ParseRecord a, ParseRecord b) => ParseRecord (a :. b) where
+  rowParser _ = (:.) <$> rowParser (undefined :: a) <*> rowParser (undefined :: b)
 
 class ToRecord a where
   type AsRecord a :: *

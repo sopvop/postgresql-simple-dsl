@@ -81,7 +81,6 @@ module Database.PostgreSQL.Simple.Dsl
      , val
      , (==.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
      , true, false, just, isNull, isInList
-     , whole
      , only
      , unonly
      , not_
@@ -92,12 +91,12 @@ module Database.PostgreSQL.Simple.Dsl
      , array_prepend
      , array_cat
      -- * Helpers
-     , Whole(..)
      , Only(..)
      , (:.)(..)
      -- * Helpers
      , IsRecord
      , FromRecord
+     , ParseRecord
      -- * Functions
      , Function
      , function
@@ -130,13 +129,13 @@ import           Data.Text                               (Text)
 import           Data.Vector                             (Vector)
 import qualified Database.PostgreSQL.LibPQ               as PQ
 import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
-                                                          FromRow, Only (..))
+                                                          Only (..))
 import qualified Database.PostgreSQL.Simple              as PG
 import           Database.PostgreSQL.Simple.Dsl.Internal
 import qualified Database.PostgreSQL.Simple.Internal     as PG
 import           Database.PostgreSQL.Simple.ToField
 import qualified Database.PostgreSQL.Simple.Types        as PG
-import           GHC.TypeLits                            (SingI)
+import           GHC.TypeLits                            (KnownSymbol)
 
 -- $use
 --
@@ -428,8 +427,10 @@ distinctOn (Expr e) = Query . lift $
            tell mempty { queryStateDistinct = Last . Just $ DistinctOn e }
 
 -- | Execute query and get results
-query :: (IsRecord a, FromRow (FromRecord a)) => Connection -> Query a -> IO [FromRecord a]
-query c q = buildQuery c (finishQuery q) >>= PG.query_ c . PG.Query
+query :: forall a .(ParseRecord a) => Connection -> Query a -> IO [FromRecord a]
+query c q = buildQuery c (finishQuery q) >>= PG.queryWith_ rp c . PG.Query
+  where
+    rp = rowParser (undefined :: a)
 
 -- | Execute discarding results, returns number of rows modified
 execute :: Connection -> Query r -> IO Int64
@@ -470,13 +471,13 @@ Expr a ||. Expr b = binOpE (plain " OR ") a b
 -- | Access field of relation
 not_ :: Expr Bool -> Expr Bool
 not_ (Expr r) = Expr $ raw "NOT "<> r
-mkAcc :: SingI t => Rel r -> Field v t a -> Expr b
+mkAcc :: KnownSymbol t => Rel r -> Field v t a -> Expr b
 mkAcc rel fld = Expr $ mkAccess rel (fieldColumn fld)
 infixl 9 ~>, ?>
-(~>) :: (SingI t) => Rel a -> Field a t b -> Expr b
+(~>) :: (KnownSymbol t) => Rel a -> Field a t b -> Expr b
 (~>) = mkAcc
 
-(?>) :: (SingI t) => Rel (Maybe a) -> Field a t b -> Expr (Maybe b)
+(?>) :: (KnownSymbol t) => Rel (Maybe a) -> Field a t b -> Expr (Maybe b)
 (?>) = mkAcc
 
 -- | like operator
@@ -484,13 +485,10 @@ infixl 9 ~>, ?>
 (~.) (Expr a) (Expr b) = binOpE (plain " ~ ") a b
 
 isInList :: ToField a => (Expr a) -> [a] -> Expr Bool
+isInList _ [] = false
 isInList (Expr a) l = binOpE (plain " IN ") a (lst)
   where
     lst = D.fromList . intersperse (plain ",") $ map toField l
-
--- | Select whole entity when projecting
-whole :: Expr a -> Expr (Whole a)
-whole (Expr a) = Expr a
 
 -- | Wrap in Only
 only :: Expr a -> Expr (Only a)
@@ -578,16 +576,16 @@ instance IsQuery (Deleting r) where
      return r
 
 infixr 7 =., =.!
-(=.) :: forall v t a. (SingI t) => Field v t a -> Expr a -> UpdExpr v
+(=.) :: forall v t a. (KnownSymbol t) => Field v t a -> Expr a -> UpdExpr v
 f =. (Expr a) = UpdExpr [(fieldColumn f, a)]
 
-(=.!) :: (SingI t, ToField a) => Field v t a -> a -> UpdExpr v
+(=.!) :: (KnownSymbol t, ToField a) => Field v t a -> a -> UpdExpr v
 (=.!) f e = f =. val e
 
-set :: SingI t => Field v t a -> Expr a -> UpdExpr v
+set :: KnownSymbol t => Field v t a -> Expr a -> UpdExpr v
 set f a = f =. a
 
-setField :: (SingI t) => Field v t a -> Expr a -> Updating v ()
+setField :: (KnownSymbol t) => Field v t a -> Expr a -> Updating v ()
 setField f a = setFields (f =. a)
 
 setFields :: UpdExpr t -> Updating t ()
@@ -646,8 +644,8 @@ deleteFromTable f = delete tn f
   where
     tn = table $ tableName (Proxy :: Proxy a)
 
-queryUpdate :: ((FromRecord t) ~ r, IsRecord t, FromRow r) => Connection -> Update t -> IO [r]
-queryUpdate con u = PG.query con "?" (Only $ finishUpdate u)
+queryUpdate :: forall t .(ParseRecord t) => Connection -> Update t -> IO [FromRecord t]
+queryUpdate con u = PG.queryWith (rowParser (undefined :: t)) con "?" (Only $ finishUpdate u)
 
 formatUpdate :: IsRecord t => Connection -> Update t -> IO ByteString
 formatUpdate con u = PG.formatQuery con "?" (Only $ finishUpdate u)
@@ -665,7 +663,7 @@ updateToQuery (Update mu) = do
   return (res, expr)
 
 
-withRecursive :: (IsRecord a) =>  Recursive a -> (a -> Query b) -> Query b
+withRecursive :: (IsRecord a) =>  Recursive a -> (From a -> Query b) -> Query  b
 withRecursive (Recursive un q f) ff = compileUnion un q f >>= ff
 
 union :: Query a -> (a -> Query a) -> Recursive a
@@ -674,7 +672,7 @@ union = Recursive UnionDistinct
 unionAll :: Query a -> (a -> Query a) -> Recursive a
 unionAll = Recursive UnionAll
 
-compileUnion :: (IsRecord a) => Union -> Query a -> (a -> Query a) -> Query a
+compileUnion :: (IsRecord a) => Union -> Query a -> (a -> Query a) -> Query (From a)
 compileUnion un q f = Query $ do
    nm <- grabName
    (exprNonRec, queryNonRec) <- compIt q
@@ -685,9 +683,9 @@ compileUnion un q f = Query $ do
      recurs
    let bld = namedRow nm renamed <> raw " AS (" <> finishIt (asValues exprNonRec) queryNonRec
            <> unioner <> finishIt (asValues exprRec) queryRec <> raw " )"
-   lift $ tell mempty { queryStateFrom = Just nm, queryStateRecursive = Any True
+   lift $ tell mempty { queryStateRecursive = Any True
                       , queryStateWith = Just bld }
-   return renamed
+   return $ From (return $ FromQuery nm renamed)
    where
      unioner = case un of
          UnionDistinct -> raw " UNION "
