@@ -109,7 +109,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , with'
      , cross
      , inner
-     , on
+--     , on
      ) where
 import           Control.Applicative
 import           Control.Exception

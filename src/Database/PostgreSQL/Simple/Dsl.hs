@@ -6,4 +6,3 @@ module Database.PostgreSQL.Simple.Dsl
 
 import           Database.PostgreSQL.Simple.Dsl.Query
 import           Database.PostgreSQL.Simple.Dsl.Record
-
