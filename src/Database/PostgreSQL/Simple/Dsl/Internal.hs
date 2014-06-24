@@ -33,9 +33,8 @@ import           Data.List                            (intersperse)
 import           Data.Maybe                           (catMaybes)
 import           Data.Monoid
 import           Data.Proxy                           (Proxy (..))
-import           Data.Sequence                        (Seq, (<|), (|>))
-import qualified Data.Sequence                        as Seq
 import           Data.Text                            (Text)
+import qualified Data.Text                            as T
 import qualified Data.Text.Encoding                   as T
 
 
@@ -64,12 +63,12 @@ class Record v =>Table v where
 fieldSym :: KnownSymbol t => Field v t a -> Proxy (t::Symbol)
 fieldSym _ = Proxy
 
-fieldColumn :: KnownSymbol t => Field v t a -> ByteString
-fieldColumn f = B.pack . symbolVal $ fieldSym f
+fieldColumn :: KnownSymbol t => Field v t a -> Text
+fieldColumn f = T.pack . symbolVal $ fieldSym f
 
 -- | Parse named field
 takeField :: (KnownSymbol f, FromField a) => (Field v f a) -> RecordParser a
-takeField f = RecordParser ([pure . plain $ fieldColumn f]) field
+takeField f = RecordParser ([pure . escapeIdent $ fieldColumn f]) field
 
 type ExprBuilder = DList Action
 
@@ -133,7 +132,7 @@ rawC c = D.singleton . Plain $ B.fromChar c
 mkAccess :: Rel t -> ExprBuilder -> ExprBuilder
 mkAccess (Rel r) fld = quoted' (pure $ Plain r) <> rawC '.' <> quoted' fld
 mkAccess (RelTable r) fld =  quoted' (pure $ Plain r) <> rawC '.' <> quoted' fld
-mkAccess (RelAliased r ) fld = quoted' $ pure (Plain r) <> rawC '.' <> fld
+mkAccess (RelAliased r ) fld = pure (Plain r) <> rawC '.' <> fld
 
 
 commaSep :: [ExprBuilder] -> ExprBuilder
@@ -144,13 +143,13 @@ data Rel r = Rel Builder
            | RelAliased Builder
 
 -- | Source of uniques
-newtype NameSource = NameSource [String]
+
+newtype NameSource = NameSource Int
 
 mkNameSource :: NameSource
-mkNameSource = NameSource $ [replicate k ['a'..'z'] | k <- [1..]] >>= sequence
+mkNameSource = NameSource 0
 grabNameFromSrc :: NameSource -> (String, NameSource)
-grabNameFromSrc (NameSource (h:t)) = (h, NameSource t)
-grabNameFromSrc _ = error "namesource empty"
+grabNameFromSrc (NameSource n) = ('_':'_':'q': show n, NameSource $ succ n)
 
 instance Show NameSource where
   show _ = "NameSource"
@@ -188,7 +187,7 @@ instance (FromRecord (Rel a) a, Record a) => IsRecord (Rel a) where
     return $ RelAliased nm'
   asRenamed (Rel nm) = return $ RelAliased nm
   asRenamed a = return a
-  asValues rel = map (mkAccess rel) . recordColumns $ (fromRecord rel :: RecordParser a)
+  asValues rel = recordColumns $ (fromRecord rel :: RecordParser a)
 
 instance IsRecord (Expr (Only a)) where
   asValues (Expr _ a) = [a]
@@ -370,16 +369,16 @@ instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f, Expr
 data Distinct = DistinctAll | Distinct | DistinctOn ExprBuilder
 
 data QueryState t = QueryState
-  { queryStateWith      :: Seq Action
+  { queryStateWith      :: Maybe ExprBuilder
   , queryStateDistinct  :: Distinct
   , queryStateRecursive :: Any
-  , queryStateFrom      :: Seq Action
-  , queryStateWhere     :: Seq Action
-  , queryStateOrder     :: Seq Action
+  , queryStateFrom      :: Maybe ExprBuilder
+  , queryStateWhere     :: Maybe ExprBuilder
+  , queryStateOrder     :: Maybe ExprBuilder
   , queryStateLimit     :: Maybe Int
   , queryStateOffset    :: Maybe Int
   , queryAction         :: t
-  , queryNameSource     :: NameSource
+  , queryNameSource     :: !NameSource
   }
 
 emptyQuery :: Monoid t => QueryState t
@@ -394,9 +393,9 @@ instance HasNameSource (QueryM t) where
 
 grabName :: HasNameSource m => m ByteString
 grabName = do
-  NameSource (n:ns) <- grabNS
-  modifyNS . const $ NameSource ns
-  return $ B.pack n
+  NameSource n <- grabNS
+  modifyNS . const . NameSource $ succ n
+  return $ B.pack  $ '_':'_':'q': show n
 
 newExpr :: HasNameSource m => m (Expr a)
 newExpr = liftM (term . builder . quoted) $ grabAlias (B.fromByteString "field.")
@@ -404,7 +403,7 @@ newExpr = liftM (term . builder . quoted) $ grabAlias (B.fromByteString "field."
 newName_ :: HasNameSource m => m Builder
 newName_ = do
   nm <- grabName
-  return $ B.fromChar 'q' <> B.fromByteString nm
+  return $ B.fromByteString nm
 
 grabAlias :: HasNameSource m => Builder -> m Builder
 grabAlias bs = do
@@ -423,9 +422,9 @@ newtype QueryM t a = QueryM { runQuery :: State (QueryState t) a }
 type Query a = QueryM () a
 
 class (HasNameSource m, Monad m) => IsQuery m where
-  modifyWith :: (Seq Action -> Seq Action) -> m ()
-  modifyFrom :: (Seq Action -> Seq Action) -> m ()
-  modifyWhere :: (Seq Action -> Seq Action) -> m ()
+  modifyWith :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
+  modifyFrom :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
+  modifyWhere :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
   modifyRecursive :: (Bool -> Bool) -> m ()
   modifyDistinct :: (Distinct -> Distinct) -> m ()
   modifyLimit :: (Maybe Int -> Maybe Int) -> m ()
@@ -467,31 +466,23 @@ instance IsQuery (QueryM t) where
     st <- get
     return $ queryNameSource st
 
-appendWith :: IsQuery m => Seq Action -> m ()
+appendWith :: IsQuery m => ExprBuilder -> m ()
 appendWith act = modifyWith $ \w ->
-  if Seq.null w
-  then act
-  else (w |> plain ",\n") <> act
+  (w `fappend` raw ",\n") <> Just act
 
-appendFrom :: IsQuery m => Seq Action -> m ()
+appendFrom :: IsQuery m => ExprBuilder -> m ()
 appendFrom f = modifyFrom $ \frm ->
-  if Seq.null frm
-  then f
-  else (frm |> plain ",\n") <> f
+  (frm `fappend` raw ",\n") <> Just f
 
-appendWhere :: IsQuery m => Seq Action -> m ()
+appendWhere :: IsQuery m => ExprBuilder -> m ()
 appendWhere w = modifyWhere $ \wh ->
-  if Seq.null wh
-  then w
-  else (wh |> plain " AND ") <> w
+  (wh `fappend` raw " AND ") <> Just w
 
 appendWhereExpr :: IsQuery m => Expr t -> m ()
 appendWhereExpr (Expr pre w) = modifyWhere $ \wh ->
-    if Seq.null wh
-      then wprep
-      else (wh |> plain " AND ") <> wprep
+    Just $ maybe wprep (\wh' -> (wh' `D.snoc` plain " AND ") <> wprep) wh
   where
-    wprep = exprToSeq (parenPrec (18 < pre) w)
+    wprep = parenPrec (18 < pre) w
 
 --compIt :: (Monoid t) => QueryM t b -> QueryM s (b, QueryState t)
 compIt :: (HasNameSource m, Monoid t) => QueryM t b -> m (b, QueryState t)
@@ -501,9 +492,9 @@ compIt (QueryM a) = do
   modifyNS $ const (queryNameSource st')
   return (res, st')
 
-finishIt :: [ExprBuilder] -> QueryState t -> Seq Action --ExprBuilder
+finishIt :: [ExprBuilder] -> QueryState t -> ExprBuilder
 finishIt expr q = finishItAgg expr Nothing q
-
+{-
 bprep :: a -> Seq a -> Seq a
 bprep prep b | Seq.null b = mempty
              | otherwise = prep Seq.<| b
@@ -517,33 +508,33 @@ plainS = Seq.singleton . plain
 
 exprToSeq :: DList a -> Seq a
 exprToSeq = Seq.fromList . D.toList
-
-finishItAgg :: [ExprBuilder] -> Maybe (ExprBuilder) -> QueryState t -> Seq Action
+-}
+finishItAgg :: [ExprBuilder] -> Maybe (ExprBuilder) -> QueryState t -> ExprBuilder
 finishItAgg expr groupBy QueryState{..} = execWriter $ do
-  tell $ bprep (plain withStart) queryStateWith
+  forM_ queryStateWith $ \w -> tell (plain withStart `D.cons` w)
   tell $ pure (plain "\nSELECT ")
   tell $ distinct queryStateDistinct
-  tell $ exprToSeq $ commaSep expr
-  tell $ bprep (plain "\nFROM ") queryStateFrom
-  tell $ bprep (plain "\nWHERE ") queryStateWhere
-  tell $ bprep (plain "\nORDER BY ") queryStateOrder
+  tell $ commaSep expr
+  forM_ queryStateFrom $ \f -> tell (plain "\nFROM " `D.cons` f)
+  forM_ queryStateWhere $ \w -> tell (plain "\nWHERE " `D.cons` w)
+  forM_ queryStateOrder $ \o -> tell (plain "\nORDER BY " `D.cons` o)
   forM_ groupBy $ \b -> do
-     tell $ plain "\nGROUP BY " <| exprToSeq b
+     tell $ plain "\nGROUP BY " `D.cons` b
   forM_ queryStateLimit $ \l -> do
-     tell $ Seq.fromList [plain "\nLIMIT ", toField l]
+     tell $ D.fromList [plain "\nLIMIT ", toField l]
   forM_ queryStateOffset $ \o -> do
-     tell $ Seq.fromList [plain "\nOFFSET ", toField o]
+     tell $ D.fromList [plain "\nOFFSET ", toField o]
   where
     distinct d = case d of
       DistinctAll -> mempty
-      Distinct -> plainS "DISTINCT "
-      DistinctOn e -> plain "DISTINCT ON (" <| (Seq.fromList (D.toList e) |> plain ") ")
+      Distinct -> raw "DISTINCT "
+      DistinctOn e -> (plain "DISTINCT ON (" `D.cons` e) `D.snoc` plain ") "
     withStart = if getAny queryStateRecursive then "\nWITH RECURSIVE "
                  else "\nWITH "
 
 --compileQuery :: Query [ExprBuilder] -> QueryM (Seq Action)
 
-compileQuery :: forall a t . (IsRecord a, Monoid t) => QueryM t a -> (Seq Action)
+compileQuery :: forall a t . (IsRecord a, Monoid t) => QueryM t a -> ExprBuilder
 compileQuery q = evalState comp (emptyQuery :: QueryState t)
  where
    comp = runQuery $ do
@@ -552,7 +543,7 @@ compileQuery q = evalState comp (emptyQuery :: QueryState t)
 
 data FromD a where
    FromTable      :: ByteString -> Builder -> a -> FromD a
-   FromQuery      :: Seq Action -> a -> FromD a
+   FromQuery      :: ExprBuilder -> a -> FromD a
    FromInnerJoin  :: FromD a -> FromD b -> ExprBuilder -> FromD (a:.b)
    FromCrossJoin  :: FromD a -> FromD b -> FromD (a:.b)
 
@@ -568,31 +559,30 @@ instance HasNameSource (State NameSource) where
   grabNS = get
   modifyNS f = modify f
 
-compileFrom :: FromD a -> (Seq Action, a)
-compileFrom (FromTable bs alias a) = (Seq.fromList [EscapeIdentifier bs, plain " AS ", Plain alias]
-
-                                     , a)
+compileFrom :: FromD a -> (ExprBuilder, a)
+compileFrom (FromTable bs alias a) =
+  (D.fromList [EscapeIdentifier bs, plain " AS ", Plain alias], a)
 compileFrom (FromQuery bs a) = (bs, a)
 compileFrom (FromInnerJoin a b cond) = (bld, ea:.eb)
   where
     (ca, ea) = compileFrom a
     (cb, eb) = compileFrom b
-    bld = (ca |> plain "\nINNER JOIN ") <> (cb |> plain " ON ") <> exprToSeq cond
+    bld = (ca `D.snoc` plain "\nINNER JOIN ") <> (cb `D.snoc` plain " ON ") <> cond
 
-compileFrom (FromCrossJoin a b) = ((ca |> plain ", ") <> cb, ea:.eb)
+compileFrom (FromCrossJoin a b) = ((ca `D.snoc` plain ", ") <> cb, ea:.eb)
   where
     (ca, ea) = compileFrom a
     (cb, eb) = compileFrom b
 
 
-finishQuery :: (FromRecord a b, IsRecord a) => Query a -> (Seq Action, RowParser b)
+finishQuery :: (FromRecord a b, IsRecord a) => Query a -> (ExprBuilder, RowParser b)
 finishQuery mq = evalState finisher $ (emptyQuery :: QueryState ())
   where
     finisher = runQuery $ do (r,q') <- compIt mq
                              let RecordParser cols parser = fromRecord r
                              return (finishIt cols q', parser)
 
-finishQueryNoRet :: Query t -> Seq Action
+finishQueryNoRet :: Query t -> ExprBuilder
 finishQueryNoRet mq = evalState finisher (emptyQuery :: QueryState ())
   where
     finisher = runQuery $ do
@@ -606,82 +596,82 @@ sortingEmpty :: Sorting -> Bool
 sortingEmpty (Sorting []) = True
 sortingEmpty _ = False
 
-compileSorting :: Sorting -> Seq Action
-compileSorting (Sorting r) = exprToSeq $ mconcat $ intersperse (raw ",") r
+compileSorting :: Sorting -> ExprBuilder
+compileSorting (Sorting r) = mconcat $ intersperse (raw ",") r
 
 
-newtype UpdExpr a = UpdExpr { getUpdates :: [(ByteString, ExprBuilder)] }
+newtype UpdExpr a = UpdExpr { getUpdates :: [(Text, ExprBuilder)] }
 instance Monoid (UpdExpr a) where
   mempty = UpdExpr mempty
   UpdExpr a `mappend` UpdExpr b = UpdExpr (a<>b)
 
-newtype Update a = Update { runUpdate :: QueryM (Seq Action) a }
+newtype Update a = Update { runUpdate :: QueryM (ExprBuilder) a }
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
-newtype Inserting r a = Inserting { runInserting :: QueryM [(ByteString, ExprBuilder)] a }
+newtype Inserting r a = Inserting { runInserting :: QueryM [(Text, ExprBuilder)] a }
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
-compileInserting :: Action -> QueryState [(ByteString, ExprBuilder)] -> Update ()
+compileInserting :: Action -> QueryState [(Text, ExprBuilder)] -> Update ()
 compileInserting table q = Update $ do
   let (cols, exprs) = unzip $ queryAction q
       withPart = queryStateWith q
-      compiledSel = finishIt exprs $ q { queryStateWith = Seq.empty }
-      res = bprep (plain "\nWITH ") withPart
-          <> Seq.fromList [plain "\nINSERT INTO ", table, plain "("]
-          <> (exprToSeq (commaSep (map raw cols)) |> plain ") (")
-          <> (compiledSel |> plain ")")
+      compiledSel = finishIt exprs $ q { queryStateWith = mempty }
+      res = opt (raw "\nWITH " `fprepend` withPart)
+            <> (D.fromList [plain "\nINSERT INTO ", table, plain "("])
+            <> (commaSep (map (pure . escapeIdent) cols) `D.snoc` plain ") (")
+            <> (compiledSel `D.snoc` plain ")")
   modify $ \st -> st { queryAction = res }
 
-finishUpdate :: FromRecord t b => Update t -> (Seq Action, RowParser b)
+finishUpdate :: FromRecord t b => Update t -> (ExprBuilder, RowParser b)
 finishUpdate (Update (QueryM u)) = (result, parser)
   where
     (expr, bld) = runState u emptyQuery
     RecordParser cols parser = fromRecord expr
-    result = (queryAction bld |> plain "\nRETURNING ") <> exprToSeq (commaSep cols)
+    result = (queryAction bld `D.snoc` plain "\nRETURNING ") <> commaSep cols
 
-compileUpdate :: (IsRecord t) => Update t -> (Seq Action)
-compileUpdate (Update (QueryM u)) = (queryAction bld |> plain "\nRETURNING ")
-                                    <> exprToSeq (commaSep $ asValues expr)
+compileUpdate :: (IsRecord t) => Update t -> ExprBuilder
+compileUpdate (Update (QueryM u)) = (queryAction bld `D.snoc` plain "\nRETURNING ")
+                                    <> (commaSep $ asValues expr)
   where
     (expr, bld) = runState u emptyQuery
 
-finishUpdateNoRet :: Update t -> Seq Action
+finishUpdateNoRet :: Update t -> ExprBuilder
 finishUpdateNoRet (Update (QueryM u)) = finish $ runState u emptyQuery
   where
     finish (_, bld) = queryAction bld
 
 
-newtype Updating r a = Updating { runUpdating :: QueryM [(ByteString, ExprBuilder)] a }
+newtype Updating r a = Updating { runUpdating :: QueryM [(Text, ExprBuilder)] a }
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
-finishUpdating :: Action -> QueryState [(ByteString, ExprBuilder)] -> Seq Action
+finishUpdating :: Action -> QueryState [(Text, ExprBuilder)] -> ExprBuilder
 finishUpdating table QueryState{..} =
-        (bprep (plain "\nWITH ") queryStateWith
-         |> plain "\nUPDATE " |> table |> plain "\nSET ")
-         <> (exprToSeq sets)
-         <> bprep (plain "\nFROM ") queryStateFrom
-         <> bprep (plain "\nWHERE ") queryStateWhere
+         opt (raw "\nWITH " `fprepend` queryStateWith)
+         <> D.fromList [plain "\nUPDATE ", table, plain "\nSET "]
+         <> sets
+         <> opt (raw "\nFROM " `fprepend` queryStateFrom)
+         <> opt (raw "\nWHERE " `fprepend` queryStateWhere)
   where
     (columns, exprs) = unzip queryAction
-    sets = raw "(" <> commaSep (map raw columns) <> raw ")=(" <> commaSep exprs <> raw ")"
+    sets = raw "(" <> commaSep (map (pure . escapeIdent) columns) <> raw ")=(" <> commaSep exprs <> raw ")"
 
 
 compileDeleting :: Action -> Deleting t b -> Update b
 compileDeleting table (Deleting del) = Update $ do
    (r, q) <- compIt del
-   let bld = (bprep (plain "\nWITH ") (queryStateWith q)
-           |> plain "\nDELETE FROM " |> table)
-           <> bprep (plain "\nUSING ") (queryStateFrom q)
-           <> bprep (plain "\nWHERE ") (queryStateWhere q)
+   let bld = opt (raw "\nWITH " `fprepend` queryStateWith q)
+           <> (raw "\nDELETE FROM " `D.snoc`  table)
+           <> opt (raw "\nUSING " `fprepend` queryStateFrom q)
+           <> opt (raw "\nWHERE " `fprepend` queryStateWhere q)
    modify $ \st -> st { queryAction = bld }
    return r
 
 
 --compileUpdating :: (MonadState NameSource m) => Action -> Updating t r -> m (r, ExprBuilder)
-compileUpdating :: Action -> Updating t a -> QueryM (Seq Action) a
+compileUpdating :: Action -> Updating t a -> QueryM ExprBuilder a
 compileUpdating table (Updating a) = do
   (r, q) <- compIt a
   let res = finishUpdating table q

@@ -37,7 +37,8 @@ library
                        containers
   hs-source-dirs:      src
   default-language:    Haskell2010
-  ghc-options: -funbox-strict-fields -O2 -Wall -fwarn-tabs
+  ghc-options: -funbox-strict-fields -O2 -Wall -fwarn-tabs 
+-- -auto-all -caf-all
 
 benchmark basic
   hs-source-dirs: benchmarks
@@ -49,4 +50,5 @@ benchmark basic
                  criterion,
                  bytestring
   default-language: Haskell2010
-  ghc-options: -funbox-strict-fields -O2 -Wall -fwarn-tabs -rtsopts
+  ghc-options: -funbox-strict-fields -O2 -Wall -fwarn-tabs -rtsopts 
+-- -auto-all -caf-all

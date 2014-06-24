@@ -10,6 +10,7 @@
 {-# LANGUAGE UndecidableInstances  #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeOperators         #-}
+{-# LANGUAGE OverlappingInstances #-}
 
 module Database.PostgreSQL.Simple.Dsl.Record
   ( (:::)(..)
@@ -197,10 +198,10 @@ instance (KnownSymbol t, RecExpr (Rec b)) => RecExpr (Rec ((t ::: Expr a) ': b))
 rtable :: forall a . RecExpr (Rec a) => T.Text -> From (Rec a)
 rtable nm = From $ do
   let bs = T.encodeUtf8 nm
-      nameBld = B.fromByteString bs
-  alias <- grabAlias nameBld
+      nameBld = EscapeIdentifier bs
+  alias <- B.fromByteString <$> grabName --Alias bs nameBld
   let r = mkRecExpr (Plain (alias <> B.fromChar '.')) (undefined :: Rec a)
-      q = (builder nameBld) <> raw " AS " <> (builder alias)
+      q = pure nameBld <> raw " AS " <> (builder alias)
 
-  return $ FromQuery (exprToSeq q) r
+  return $ FromQuery q r
 

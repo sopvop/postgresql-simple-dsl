@@ -129,8 +129,6 @@ import           Data.List                               (intersperse)
 import           Data.Maybe
 import           Data.Monoid
 import           Data.Proxy                              (Proxy (..))
-import           Data.Sequence                           (Seq, (<|), (|>))
-import qualified Data.Sequence                           as Seq
 import           Data.Text                               (Text)
 import qualified Data.Text.Encoding                      as T
 import           Data.Vector                             (Vector)
@@ -257,16 +255,16 @@ table :: (Record a) => Text -> From (Rel a)
 table nm = From $ do
   let bs = T.encodeUtf8 nm
       nameBld = B.fromByteString bs
-  alias <- newName_ --grabAlias nameBld
-  return $ FromTable bs alias (RelTable alias)
+  alias <- grabAlias nameBld
+  return $ FromTable bs alias (RelAliased alias)
 
 compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (FromD a)
 compileValues vals renamed = do
   nm <- newName
-  let res = ((plain "(VALUES "<| body) |> plain ") AS ") <> (exprToSeq $ namedRow nm renamed)
+  let res = ((plain "(VALUES " `D.cons` body) `D.snoc` plain ") AS ") <> namedRow nm renamed
   return $ FromQuery res renamed
   where
-    body = exprToSeq $ commaSep $ map packRow vals
+    body = commaSep $ map packRow vals
     packRow r = raw "(" <> commaSep (asValues r) <> raw ")"
 
 values :: forall a . (IsRecord a) => [a] -> From a
@@ -299,8 +297,8 @@ select mq = From $ do
   (r, q) <- compIt mq
   nm <- newName
   renamed <- asRenamed r
-  let bld = ((plain "(" <| finishIt (asValues r) q) |> plain ") AS ")
-            <> exprToSeq (namedRow nm renamed)
+  let bld = ((plain "(" `D.cons` finishIt (asValues r) q) `D.snoc` plain ") AS ")
+            <> namedRow nm renamed
   return $ FromQuery bld renamed
 
 with :: (IsRecord b) => Query b -> (From b -> Query c) -> Query c
@@ -308,17 +306,17 @@ with mq act = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
   nm <- newName
-  let bld = exprToSeq (namedRow nm renamed)
-            <> (plain " AS ( " <| (finishIt (asValues e) q |> plain ")"))
+  let bld = namedRow nm renamed
+            <> (plain " AS ( " `D.cons` (finishIt (asValues e) q `D.snoc` plain ")"))
   appendWith bld
-  act $ From . return $ FromQuery (exprToSeq nm) renamed
+  act $ From . return $ FromQuery nm renamed
 
 withUpdate (Update mq) = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
   nm <- newName
-  let bld = exprToSeq (namedRow nm renamed)
-          <> (plain " AS ( "  <| (queryAction q |> plain ")"))
+  let bld = namedRow nm renamed
+          <> (plain " AS ( "  `D.cons` (queryAction q `D.snoc` plain ")"))
   appendWith bld
   return renamed
 
@@ -351,7 +349,7 @@ namedRow nm r = nm <> raw "(" <> commaSep (asValues r) <> raw ")"
 
 
 exists :: IsRecord a => Query a -> Expr Bool
-exists mq = term $ D.fromList . toList $ (plain " EXISTS (" <| body) |> plain ")"
+exists mq = term $ D.fromList . toList $ (plain " EXISTS (" `D.cons` body) `D.snoc` plain ")"
   where
     body = compileQuery mq
 
@@ -360,8 +358,8 @@ orderBy :: Sorting -> Query ()
 orderBy f | sortingEmpty f = return ()
           | otherwise = modify $ \st -> let or = queryStateOrder st
                                         in st { queryStateOrder = go or }
-   where go o | Seq.null o = sort
-              | otherwise = (o |> plain ",") <> sort
+   where go Nothing = Just sort
+         go (Just o) = Just $ (o `D.snoc` plain ",") <> sort
          sort = compileSorting f
 
 -- | ascend on expression
@@ -433,7 +431,7 @@ not_ :: Expr Bool -> Expr Bool
 not_ r = prefOp 17 (raw " NOT ") r
 
 mkAcc :: KnownSymbol t => Rel r -> Field v t a -> Expr b
-mkAcc rel fld = Expr 2 $ mkAccess rel (raw $ fieldColumn fld)
+mkAcc rel fld = Expr 2 $ mkAccess rel (pure . escapeIdent $ fieldColumn fld)
 
 infixl 9 ~>, ?>
 (~>) :: (KnownSymbol t) => Rel a -> Field a t b -> Expr b
@@ -450,7 +448,7 @@ isInList :: ToField a => (Expr a) -> [a] -> Expr Bool
 isInList _ [] = false
 isInList a l = binOp 11 (plain " IN ") a (term (lst))
   where
-    lst = addParens $ D.fromList . intersperse (plain ",") $ map toField l
+    lst = D.singleton $ toField $ PG.In l --fromList . intersperse (plain ",") $ map toField l
 
 -- | Wrap in Only
 only :: Expr a -> Expr (Only a)
@@ -578,11 +576,11 @@ compileUnion un q f = do
    nm <- newName
    (exprNonRec, queryNonRec) <- compIt q
    renamed <- asRenamed exprNonRec
-   let frm = From . return $ FromQuery (exprToSeq nm) renamed
+   let frm = From . return $ FromQuery nm renamed
    (exprRec, queryRec) <- compIt $ f frm
-   let bld = exprToSeq (namedRow nm renamed)
-           <> (plain " AS (" <| finishIt (asValues exprNonRec) queryNonRec)
-           <> ((unioner <| finishIt (asValues exprRec) queryRec) |> plain ")")
+   let bld = namedRow nm renamed
+           <> (plain " AS (" `D.cons` finishIt (asValues exprNonRec) queryNonRec)
+           <> ((unioner `D.cons` finishIt (asValues exprRec) queryRec) `D.snoc` plain ")")
    modifyRecursive $ const True
    appendWith bld
    return frm
@@ -602,7 +600,7 @@ aggregate f q = do
                 xs -> finishItAgg (asValues resExpr) (Just $ commaSep xs) q'
     nm <- newName
     renamed <- asRenamed resExpr
-    appendFrom $ plain "(" <| compiled <> exprToSeq (raw ") AS " <> namedRow nm renamed)
+    appendFrom $ (plain "(" `D.cons` (compiled `D.snoc` plain ") AS ")) <> namedRow nm renamed
     return renamed
 
 groupBy :: Expr a -> ExprA a
@@ -637,8 +635,8 @@ escapeIdentifier conn s =
     PG.withConnection conn $ \c ->
     PQ.escapeIdentifier c s >>= checkError c
 
-buildQuery :: Connection -> Seq Action -> IO ByteString
-buildQuery conn q = B.toByteString <$> foldlM sub mempty q
+buildQuery :: Connection -> ExprBuilder -> IO ByteString
+buildQuery conn q = B.toByteString <$> foldlM sub mempty (D.toList q)
   where
     sub !acc (Plain b)       = pure $ acc <> b
     sub !acc (Escape s)      = (mappend acc . quote) <$> escapeStringConn conn s
@@ -677,14 +675,14 @@ with' mq act = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
   nm <- newName
-  let bld = exprToSeq (namedRow nm renamed)
-            <> (plain " AS ( " <| (finishIt (asValues e) q |> plain ")"))
+  let bld = namedRow nm renamed
+            <> (plain " AS ( " `D.cons` (finishIt (asValues e) q `D.snoc` plain ")"))
   appendWith bld
-  act $ From . return $ FromQuery (exprToSeq nm) renamed
+  act $ From . return $ FromQuery nm renamed
 
 
 exists' :: IsRecord a => Query a -> Expr a
-exists' mq = term $ D.fromList . toList $ (plain " EXISTS (" <| body) |> plain ")"
+exists' mq = term $ D.fromList . toList $ (plain " EXISTS (" `D.cons` body) `D.snoc` plain ")"
   where
     body = compileQuery mq
 
@@ -697,5 +695,5 @@ rtable nm = From $ do
   ren <- asRenamed (undefined :: a)
   let q = (pure $ Plain nameBld) <> raw " AS " <> alias <> addParens (commaSep (asValues ren))
 
-  return $ FromQuery (exprToSeq q) ren
+  return $ FromQuery q ren
 
