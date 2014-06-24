@@ -390,6 +390,8 @@ emptyQueryWith = QueryState mempty DistinctAll mempty mempty mempty mempty Nothi
 instance HasNameSource (QueryM t) where
   grabNS = getNameSource
   modifyNS = modifyNameSource
+  {-# INLINE grabNS #-}
+  {-# INLINE modifyNS #-}
 
 grabName :: HasNameSource m => m ByteString
 grabName = do
@@ -397,21 +399,27 @@ grabName = do
   modifyNS . const . NameSource $ succ n
   return $ B.pack  $ '_':'_':'q': show n
 
+{-# INLINE grabName #-}
+
 newExpr :: HasNameSource m => m (Expr a)
 newExpr = liftM (term . builder . quoted) $ grabAlias (B.fromByteString "field.")
+{-# INLINE newExpr #-}
 
 newName_ :: HasNameSource m => m Builder
 newName_ = do
   nm <- grabName
   return $ B.fromByteString nm
+{-# INLINE newName_ #-}
 
 grabAlias :: HasNameSource m => Builder -> m Builder
 grabAlias bs = do
   nm <- grabName
   return $ bs <> B.fromChar '_' <> B.fromByteString nm
+{-# INLINE grabAlias #-}
 
 newName :: HasNameSource m => m (DList Action)
 newName = liftM (D.singleton . Plain) newName_
+{-# INLINE newName #-}
 
 newNameA :: HasNameSource m => m Action
 newNameA = liftM Plain newName_
@@ -466,23 +474,39 @@ instance IsQuery (QueryM t) where
     st <- get
     return $ queryNameSource st
 
+  {-# INLINE modifyWith #-}
+  {-# INLINE modifyFrom #-}
+  {-# INLINE modifyWhere #-}
+  {-# INLINE modifyRecursive #-}
+  {-# INLINE modifyDistinct #-}
+  {-# INLINE modifyLimit #-}
+  {-# INLINE modifyOffset #-}
+  {-# INLINE modifyNameSource #-}
+  {-# INLINE getNameSource #-}
+
 appendWith :: IsQuery m => ExprBuilder -> m ()
 appendWith act = modifyWith $ \w ->
   (w `fappend` raw ",\n") <> Just act
 
+{-# INLINE appendWith #-}
+
 appendFrom :: IsQuery m => ExprBuilder -> m ()
 appendFrom f = modifyFrom $ \frm ->
   (frm `fappend` raw ",\n") <> Just f
+{-# INLINE appendFrom #-}
 
 appendWhere :: IsQuery m => ExprBuilder -> m ()
 appendWhere w = modifyWhere $ \wh ->
   (wh `fappend` raw " AND ") <> Just w
+{-# INLINE appendWhere #-}
 
 appendWhereExpr :: IsQuery m => Expr t -> m ()
 appendWhereExpr (Expr pre w) = modifyWhere $ \wh ->
     Just $ maybe wprep (\wh' -> (wh' `D.snoc` plain " AND ") <> wprep) wh
   where
     wprep = parenPrec (18 < pre) w
+
+{-# INLINE appendWhereExpr #-}
 
 --compIt :: (Monoid t) => QueryM t b -> QueryM s (b, QueryState t)
 compIt :: (HasNameSource m, Monoid t) => QueryM t b -> m (b, QueryState t)
@@ -491,24 +515,12 @@ compIt (QueryM a) = do
   let (res, st') = runState a $ emptyQueryWith $ ns
   modifyNS $ const (queryNameSource st')
   return (res, st')
+{-# INLINE compIt #-}
 
 finishIt :: [ExprBuilder] -> QueryState t -> ExprBuilder
 finishIt expr q = finishItAgg expr Nothing q
-{-
-bprep :: a -> Seq a -> Seq a
-bprep prep b | Seq.null b = mempty
-             | otherwise = prep Seq.<| b
+{-# INLINE finishIt #-}
 
-bapp :: Seq a -> a -> Seq a
-bapp a app | Seq.null a = mempty
-           | otherwise = a Seq.|> app
-
-plainS :: ByteString -> Seq Action
-plainS = Seq.singleton . plain
-
-exprToSeq :: DList a -> Seq a
-exprToSeq = Seq.fromList . D.toList
--}
 finishItAgg :: [ExprBuilder] -> Maybe (ExprBuilder) -> QueryState t -> ExprBuilder
 finishItAgg expr groupBy QueryState{..} = execWriter $ do
   forM_ queryStateWith $ \w -> tell (plain withStart `D.cons` w)
@@ -552,12 +564,15 @@ fromExpr (FromTable _ _ a) = a
 fromExpr (FromQuery _ a) = a
 fromExpr (FromInnerJoin a b _) = fromExpr a :. fromExpr b
 fromExpr (FromCrossJoin a b) = fromExpr a :. fromExpr b
+{-# INLINE fromExpr #-}
 
 newtype From a = From { runFrom :: State NameSource (FromD a) }
 
 instance HasNameSource (State NameSource) where
   grabNS = get
   modifyNS f = modify f
+  {-# INLINE grabNS #-}
+  {-# INLINE modifyNS #-}
 
 compileFrom :: FromD a -> (ExprBuilder, a)
 compileFrom (FromTable bs alias a) =
@@ -595,10 +610,11 @@ newtype Sorting = Sorting [ExprBuilder]
 sortingEmpty :: Sorting -> Bool
 sortingEmpty (Sorting []) = True
 sortingEmpty _ = False
+{-# INLINE sortingEmpty #-}
 
 compileSorting :: Sorting -> ExprBuilder
 compileSorting (Sorting r) = mconcat $ intersperse (raw ",") r
-
+{-# INLINE compileSorting #-}
 
 newtype UpdExpr a = UpdExpr { getUpdates :: [(Text, ExprBuilder)] }
 instance Monoid (UpdExpr a) where

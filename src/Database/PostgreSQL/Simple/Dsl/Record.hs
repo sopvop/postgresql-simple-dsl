@@ -204,4 +204,4 @@ rtable nm = From $ do
       q = pure nameBld <> raw " AS " <> (builder alias)
 
   return $ FromQuery q r
-
+{-# INLINE rtable #-}

@@ -257,6 +257,7 @@ table nm = From $ do
       nameBld = B.fromByteString bs
   alias <- grabAlias nameBld
   return $ FromTable bs alias (RelAliased alias)
+{-# INLINE table #-}
 
 compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (FromD a)
 compileValues vals renamed = do
@@ -290,7 +291,7 @@ fromPureValues = from . pureValues
 
 where_ :: IsQuery m => Expr Bool -> m ()
 where_ = appendWhereExpr
-
+{-# INLINE where_ #-}
 
 select :: (IsRecord b) => Query b -> From b
 select mq = From $ do
@@ -328,6 +329,8 @@ from (From mfrm) = do
   appendFrom cmp
   modifyNameSource (const ns')
   return expr
+
+{-# INLINE from #-}
 
 -- | Inner join
 innerJoin :: forall a b .(IsRecord a, IsRecord b) =>

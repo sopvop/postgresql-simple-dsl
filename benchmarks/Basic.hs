@@ -27,11 +27,10 @@ import           Criterion.Main                 (defaultMain)
 import           Database.PostgreSQL.Simple     (Connection, connectPostgreSQL)
 import qualified Database.PostgreSQL.Simple     as PG
 import           Database.PostgreSQL.Simple.Dsl
-import           Database.PostgreSQL.Simple.Dsl.Record
 
 
-data Foo = Foo { fooInt :: Int, fooString :: String
-               } deriving (Show)
+data Foo = Foo Int String
+               deriving (Show)
 
 instance Record Foo where
   data Field Foo t a where
@@ -45,6 +44,7 @@ instance FromRecord (Rel Foo) Foo where
 foos :: From (Rel Foo)
 foos = table "foo_table"
 
+bench1 :: Connection -> [Int] -> String -> Int -> IO B.ByteString
 bench1 c l s i = formatQuery c $ do
   f <- from foos
   fb <- from foos
@@ -56,12 +56,15 @@ bench1 c l s i = formatQuery c $ do
 
 {-# NOINLINE bench1 #-}
 
-foo_string = SField :: "foo_string" ::: Expr String
-foo_int = SField :: "foo_int" ::: Expr Int
+foo_string :: "foo_string" ::: Expr String
+foo_string = SField
+foo_int :: "foo_int" ::: Expr Int
+foo_int = SField
 
 foo_table :: From (Rec '["foo_string" ::: Expr String, "foo_int" ::: Expr Int])
 foo_table = rtable "foo_table"
 
+bench2 :: Connection -> [Int] -> String -> Int -> IO B.ByteString
 bench2 c l s i = formatQuery c $ do
   f <- from foo_table
   fb <- from foo_table
