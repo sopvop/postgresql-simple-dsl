@@ -7,6 +7,8 @@
 
 import           Control.Applicative
 
+import qualified Data.ByteString.Char8          as B
+
 import           Criterion
 import           Criterion.Main                 (defaultMain)
 
@@ -28,11 +30,11 @@ instance Record Foo where
 foos :: From (Rel Foo)
 foos = table "foo_table"
 
-bench1 c = formatQuery c $ do
+bench1 c l s i = formatQuery c $ do
   f <- from foos
   fb <- from foos
-  where_ $ f~>FooInt `isInList` [1..10] &&. f~>FooString ==. val "baz"
-            ||. f~>FooInt >. val 20 &&. f~>FooInt ==. fb~>FooInt
+  where_ $ f~>FooInt `isInList` l &&. f~>FooString ==. val s
+            ||. f~>FooInt >. val i &&. f~>FooInt ==. fb~>FooInt
   return (f :. fb)
 
 {-# NOINLINE bench1 #-}
@@ -40,4 +42,5 @@ bench1 c = formatQuery c $ do
 main :: IO ()
 main = do
   con <- connectPostgreSQL "dbname=testdb"
-  defaultMain [bench "simple" $ nfIO $ bench1 con ]
+  defaultMain [bench "simple" $ nfIO $ bench1 con [1..10] "foo" 20]
+  B.putStrLn =<< bench1 con [1..10] "foo" 20
