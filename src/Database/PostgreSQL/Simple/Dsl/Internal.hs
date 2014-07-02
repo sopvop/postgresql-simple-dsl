@@ -53,12 +53,7 @@ import           Database.PostgreSQL.Simple.ToField
 
 
 -- | Class for entities which have columns
-class Record v where
-  data Field v (t :: Symbol) b :: *
-
--- | Class for naming tables
-class Record v =>Table v where
-  tableName :: Proxy v -> Text
+data family Field v (t :: Symbol) b :: *
 
 fieldSym :: KnownSymbol t => Field v t a -> Proxy (t::Symbol)
 fieldSym _ = Proxy
@@ -181,7 +176,7 @@ recField (Expr _ e) = RecordParser [e] field
 class FromRecord a b where
   fromRecord :: a -> RecordParser b
 
-instance (FromRecord (Rel a) a, Record a) => IsRecord (Rel a) where
+instance (FromRecord (Rel a) a) => IsRecord (Rel a) where
   asRenamed (RelTable nm) = do
     nm' <- grabAlias nm
     return $ RelAliased nm'
@@ -544,8 +539,6 @@ finishItAgg expr groupBy QueryState{..} = execWriter $ do
     withStart = if getAny queryStateRecursive then "\nWITH RECURSIVE "
                  else "\nWITH "
 
---compileQuery :: Query [ExprBuilder] -> QueryM (Seq Action)
-
 compileQuery :: forall a t . (IsRecord a, Monoid t) => QueryM t a -> ExprBuilder
 compileQuery q = evalState comp (emptyQuery :: QueryState t)
  where
@@ -559,6 +552,32 @@ data FromD a where
    FromInnerJoin  :: FromD a -> FromD b -> ExprBuilder -> FromD (a:.b)
    FromCrossJoin  :: FromD a -> FromD b -> FromD (a:.b)
 
+data Table a = Table !Text
+
+-- | class for things which can be used in FROM clause
+class FromItem f a | f -> a where
+   fromItem :: f -> From a
+
+instance FromItem (From a) a where
+   fromItem = id
+
+instance FromItem (Table (Rel r)) (Rel r) where
+  fromItem (Table nm) = From $ do
+    let bs = T.encodeUtf8 nm
+        nameBld = B.fromByteString bs
+    alias <- grabAlias nameBld
+    return $ FromTable bs alias (RelAliased alias)
+
+instance (IsRecord a) => FromItem (Query a) a where
+  fromItem mq = From $ do
+     (r, q) <- compIt mq
+     nm <- newName
+     renamed <- asRenamed r
+     let bld = ((plain "(" `D.cons` finishIt (asValues r) q) `D.snoc` plain ") AS ")
+               <> namedRow nm renamed
+     return $ FromQuery bld renamed
+
+
 fromExpr :: FromD a -> a
 fromExpr (FromTable _ _ a) = a
 fromExpr (FromQuery _ a) = a
@@ -567,6 +586,9 @@ fromExpr (FromCrossJoin a b) = fromExpr a :. fromExpr b
 {-# INLINE fromExpr #-}
 
 newtype From a = From { runFrom :: State NameSource (FromD a) }
+
+namedRow :: IsRecord a => ExprBuilder -> a -> ExprBuilder
+namedRow nm r = nm <> raw "(" <> commaSep (asValues r) <> raw ")"
 
 instance HasNameSource (State NameSource) where
   grabNS = get
@@ -590,11 +612,11 @@ compileFrom (FromCrossJoin a b) = ((ca `D.snoc` plain ", ") <> cb, ea:.eb)
     (cb, eb) = compileFrom b
 
 
-finishQuery :: (FromRecord a b, IsRecord a) => Query a -> (ExprBuilder, RowParser b)
-finishQuery mq = evalState finisher $ (emptyQuery :: QueryState ())
+finishQuery :: (a -> RecordParser b) -> Query a -> (ExprBuilder, RowParser b)
+finishQuery fromRec mq = evalState finisher $ (emptyQuery :: QueryState ())
   where
     finisher = runQuery $ do (r,q') <- compIt mq
-                             let RecordParser cols parser = fromRecord r
+                             let RecordParser cols parser = fromRec r
                              return (finishIt cols q', parser)
 
 finishQueryNoRet :: Query t -> ExprBuilder
@@ -640,11 +662,11 @@ compileInserting table q = Update $ do
             <> (compiledSel `D.snoc` plain ")")
   modify $ \st -> st { queryAction = res }
 
-finishUpdate :: FromRecord t b => Update t -> (ExprBuilder, RowParser b)
-finishUpdate (Update (QueryM u)) = (result, parser)
+finishUpdate :: (a -> RecordParser b) -> Update a -> (ExprBuilder, RowParser b)
+finishUpdate recParser (Update (QueryM u)) = (result, parser)
   where
     (expr, bld) = runState u emptyQuery
-    RecordParser cols parser = fromRecord expr
+    RecordParser cols parser = recParser expr
     result = (queryAction bld `D.snoc` plain "\nRETURNING ") <> commaSep cols
 
 compileUpdate :: (IsRecord t) => Update t -> ExprBuilder
@@ -663,10 +685,10 @@ newtype Updating r a = Updating { runUpdating :: QueryM [(Text, ExprBuilder)] a 
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
-finishUpdating :: Action -> QueryState [(Text, ExprBuilder)] -> ExprBuilder
+finishUpdating :: ExprBuilder -> QueryState [(Text, ExprBuilder)] -> ExprBuilder
 finishUpdating table QueryState{..} =
          opt (raw "\nWITH " `fprepend` queryStateWith)
-         <> D.fromList [plain "\nUPDATE ", table, plain "\nSET "]
+         <> raw "\nUPDATE " <> table <> raw "\nSET "
          <> sets
          <> opt (raw "\nFROM " `fprepend` queryStateFrom)
          <> opt (raw "\nWHERE " `fprepend` queryStateWhere)
@@ -687,7 +709,7 @@ compileDeleting table (Deleting del) = Update $ do
 
 
 --compileUpdating :: (MonadState NameSource m) => Action -> Updating t r -> m (r, ExprBuilder)
-compileUpdating :: Action -> Updating t a -> QueryM ExprBuilder a
+compileUpdating :: ExprBuilder -> Updating t a -> QueryM ExprBuilder a
 compileUpdating table (Updating a) = do
   (r, q) <- compIt a
   let res = finishUpdating table q

@@ -1,6 +1,7 @@
 {-# LANGUAGE BangPatterns          #-}
 {-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
@@ -11,27 +12,27 @@ module Database.PostgreSQL.Simple.Dsl.Query
      -- * Example of usage
      -- $use
      -- * Defining Records
-       Record (..)
-     , takeField
+      takeField
      , recField
+     , Field
      , RecordParser
      , recordRowParser
 
      -- * Exequting queries
      , Query
      , query
+     , queryWith
      , execute
      , formatQuery
      -- * From
      , Table (..)
+     , FromItem
      , From
      , from
      , table
---     , rtable
      , select
      , values
      , pureValues
-     , fromTable
      , fromValues
      , fromPureValues
      , innerJoin
@@ -58,12 +59,9 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , UpdExpr
      , Updating
      , update
-     , updateTable
      , insert
-     , insertIntoTable
      , Deleting
      , delete
-     , deleteFromTable
      , set
      , (=.)
      , (=.!)
@@ -71,6 +69,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , setFields
      -- * Executing updates
      , queryUpdate
+     , queryUpdateWith
      , executeUpdate
      , formatUpdate
      -- * Expressions
@@ -84,6 +83,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , not_
      , exists
      , unsafeCast
+     , cast
      , array
      , array_append
      , array_prepend
@@ -113,24 +113,17 @@ module Database.PostgreSQL.Simple.Dsl.Query
      ) where
 import           Control.Applicative
 import           Control.Exception
-import           Control.Monad                           (unless)
 import           Control.Monad.State.Class
-import           Control.Monad.Trans
 import           Control.Monad.Trans.State               (runState)
-import           Control.Monad.Trans.Writer
 import           Data.Foldable                           (foldlM, toList)
 
 import           Blaze.ByteString.Builder                as B
 import           Data.ByteString                         (ByteString)
-import qualified Data.ByteString.Char8                   as B
 import qualified Data.DList                              as D
 import           Data.Int                                (Int64)
-import           Data.List                               (intersperse)
 import           Data.Maybe
 import           Data.Monoid
-import           Data.Proxy                              (Proxy (..))
 import           Data.Text                               (Text)
-import qualified Data.Text.Encoding                      as T
 import           Data.Vector                             (Vector)
 import qualified Database.PostgreSQL.LibPQ               as PQ
 import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
@@ -251,12 +244,9 @@ import           GHC.TypeLits                            (KnownSymbol)
 -- | Name a table, add proper type annotation for type safety.
 --   This is helpfyl if you can select your record from several tables or views.
 --   Using Table class is safer
-table :: (Record a) => Text -> From (Rel a)
-table nm = From $ do
-  let bs = T.encodeUtf8 nm
-      nameBld = B.fromByteString bs
-  alias <- grabAlias nameBld
-  return $ FromTable bs alias (RelAliased alias)
+--table :: (ParseRecord (Rel a)) => Text -> From (Rel a)
+table :: Text -> Table a
+table = Table
 {-# INLINE table #-}
 
 compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (FromD a)
@@ -277,11 +267,6 @@ pureValues :: forall a. (ToRecord a, IsRecord (AsRecord a)) => [a] -> From (AsRe
 pureValues inp = From $ do
    renamed <- asRenamed (undefined :: AsRecord a)
    compileValues (map toRecord inp) renamed
-
--- | Start query with table - SELECT table.*
-fromTable :: forall a.(Table a, Record a) => Query (Rel a)
-fromTable = from . table $ tableName (Proxy :: Proxy a)
-
 
 fromValues :: (IsRecord a, IsQuery m) => [a] -> m a
 fromValues = from . values
@@ -312,6 +297,7 @@ with mq act = do
   appendWith bld
   act $ From . return $ FromQuery nm renamed
 
+withUpdate :: (IsRecord b, IsQuery m) => Update b -> m b
 withUpdate (Update mq) = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
@@ -321,10 +307,10 @@ withUpdate (Update mq) = do
   appendWith bld
   return renamed
 
-from :: IsQuery m => From a -> m a
-from (From mfrm) = do
+from :: (IsQuery m, FromItem f a) => f -> m a
+from fr = do
   ns <- getNameSource
-  let (frm, ns') = runState mfrm ns
+  let (frm, ns') = runState (runFrom $ fromItem fr) ns
       (cmp, expr) = compileFrom frm
   appendFrom cmp
   modifyNameSource (const ns')
@@ -342,14 +328,10 @@ innerJoin (From mfa) (From mfb) f = From $ do
     return $ FromInnerJoin fa fb onexpr
 
 -- | Cross join
-crossJoin :: forall a b .(IsRecord a, IsRecord b) =>
-             From a -> From b -> From (a:.b)
-crossJoin (From fa) (From fb) = From $ FromCrossJoin <$> fa <*> fb
-
-
-namedRow :: IsRecord a => ExprBuilder -> a -> ExprBuilder
-namedRow nm r = nm <> raw "(" <> commaSep (asValues r) <> raw ")"
-
+crossJoin :: (FromItem a a', FromItem b b') => a -> b -> From (a' :. b')
+crossJoin fa fb = From $ FromCrossJoin <$> runFrom (fromItem fa)
+                                       <*> runFrom (fromItem fb)
+{-# INLINE crossJoin #-}
 
 exists :: IsRecord a => Query a -> Expr Bool
 exists mq = term $ D.fromList . toList $ (plain " EXISTS (" `D.cons` body) `D.snoc` plain ")"
@@ -387,10 +369,13 @@ distinctOn :: Expr t -> Query ()
 distinctOn (Expr _ e) = modifyDistinct . const $ DistinctOn e
 
 -- | Execute query and get results
-query :: forall a b . (FromRecord a b, IsRecord a) => Connection -> Query a -> IO [b]
-query c q = buildQuery c body >>= PG.queryWith_ parser c . PG.Query
+queryWith :: Connection -> (a -> RecordParser r) -> Query a -> IO [r]
+queryWith c fromRec q = buildQuery c body >>= PG.queryWith_ parser c . PG.Query
   where
-    (body, parser) = finishQuery q
+    (body, parser) = finishQuery fromRec q
+
+query :: FromRecord a b => Connection -> Query a -> IO [b]
+query c q = queryWith c fromRecord q
 
 -- | Execute discarding results, returns number of rows modified
 execute :: Connection -> Query r -> IO Int64
@@ -451,7 +436,7 @@ isInList :: ToField a => (Expr a) -> [a] -> Expr Bool
 isInList _ [] = false
 isInList a l = binOp 11 (plain " IN ") a (term (lst))
   where
-    lst = D.singleton $ toField $ PG.In l --fromList . intersperse (plain ",") $ map toField l
+    lst = D.singleton $ toField $ PG.In l
 
 -- | Wrap in Only
 only :: Expr a -> Expr (Only a)
@@ -475,6 +460,8 @@ isNull r = binOp 7 (plain " IS ") r (term $ raw "NULL")
 unsafeCast :: Expr a -> Expr b
 unsafeCast (Expr p r) = Expr p r
 
+cast :: ByteString -> Expr a -> Expr b
+cast t (Expr p b) = Expr 1 $ parenPrec (1 < p) b <> raw "::" <> raw t
 
 array :: Expr a -> Expr (Vector a)
 array (Expr _ r) = term $ raw "ARRAY["<> r <> raw "]"
@@ -508,16 +495,12 @@ setFields (UpdExpr x) = Updating $ do
   st <- get
   put st { queryAction = queryAction st <> x }
 
-
-updateTable :: forall a b. Table a => (Rel a -> Updating a b) -> Update b
-updateTable f = update (table $ tableName (Proxy :: Proxy a)) f
-
 update :: From (Rel a) -> (Rel a -> Updating a b) -> Update b
 update r f = Update $ do
   ns <- grabNS
   let (FromTable nm alias expr, ns') = runState (runFrom r) ns
   modifyNS $ const ns'
-  compileUpdating (Plain $ B.fromByteString nm <> B.fromByteString " AS " <> alias) $ f expr
+  compileUpdating (raw nm <> raw " AS " <> builder alias) $ f expr
 
 insert :: From (Rel a) -> Query (UpdExpr a) -> Update (Rel a)
 insert r mq = do
@@ -529,11 +512,6 @@ insert r mq = do
   compileInserting (plain nm) $ q {queryAction = upd}
   return rel
 
-insertIntoTable :: forall a .(Table a) => Query (UpdExpr a) -> Update (Rel a)
-insertIntoTable f = do
-    insert tn f
-  where
-    tn = table $ tableName (Proxy :: Proxy a)
 -- | Delete row from given table
 -- > delete (from users) $ \u -> where & u~>UserKey ==. val uid
 -- turns into
@@ -547,18 +525,17 @@ delete r f = do
 
 -- | Same as above but table is taken from table class
 -- > deleteFromTable $ \u -> where & u~>UserKey ==. val uid
-deleteFromTable :: forall a b .(Table a) => (Rel a -> Deleting a b) -> Update b
-deleteFromTable f = delete tn f
-  where
-    tn = table $ tableName (Proxy :: Proxy a)
-
-queryUpdate :: forall t b .(FromRecord t b, IsRecord t)
-            => Connection -> Update t -> IO [b]
-queryUpdate con u = do
+queryUpdateWith :: Connection -> (a -> RecordParser b) -> Update a -> IO [b]
+queryUpdateWith con fromRec u = do
     q <- buildQuery con body
     PG.queryWith_ parser con (PG.Query q)
   where
-    (body, parser) = finishUpdate u
+    (body, parser) = finishUpdate fromRec u
+
+queryUpdate :: FromRecord a b => Connection -> Update a -> IO [b]
+queryUpdate con u = queryUpdateWith con fromRecord u
+{-# INLINE queryUpdate #-}
+
 formatUpdate :: IsRecord t => Connection -> Update t -> IO ByteString
 formatUpdate con u = buildQuery con (compileUpdate u)
 
@@ -663,15 +640,17 @@ infixl 2 `on`
 
 infixr 3 `cross`
 
-from' :: (IsQuery m) => From a -> (a -> m b) -> m b
-from' (From a) f = do
+from' :: (IsQuery m, FromItem f a) => f -> (a -> m b) -> m b
+from' fi f = do
   ns <- grabNS
-  let (frm, ns') = runState a ns
+  let (frm, ns') = runState (runFrom $ fromItem fi) ns
       (cmp, expr) = compileFrom frm
   appendFrom cmp
   modifyNS $ const ns'
   r <- f expr
   return r
+
+{-# INLINE from' #-}
 
 with' :: (IsRecord a, IsQuery m) => Query a -> (From a -> m b) -> m b
 with' mq act = do
@@ -688,15 +667,4 @@ exists' :: IsRecord a => Query a -> Expr a
 exists' mq = term $ D.fromList . toList $ (plain " EXISTS (" `D.cons` body) `D.snoc` plain ")"
   where
     body = compileQuery mq
-
-
-rtable :: forall a . (IsRecord a) => Text -> From a
-rtable nm = From $ do
-  let bs = T.encodeUtf8 nm
-      nameBld = B.fromByteString bs
-  alias <- newName --grabAlias nameBld
-  ren <- asRenamed (undefined :: a)
-  let q = (pure $ Plain nameBld) <> raw " AS " <> alias <> addParens (commaSep (asValues ren))
-
-  return $ FromQuery q ren
 

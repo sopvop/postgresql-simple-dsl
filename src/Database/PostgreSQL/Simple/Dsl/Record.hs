@@ -25,7 +25,8 @@ module Database.PostgreSQL.Simple.Dsl.Record
   , rGet
   , rSet
   , rOver
-  , rtable
+  , rupdate
+  , setR
   ) where
 
 import           GHC.TypeLits
@@ -195,13 +196,27 @@ instance (KnownSymbol t, RecExpr (Rec b)) => RecExpr (Rec ((t ::: Expr a) ': b))
      h =  SField =: (Expr 0 $ D.fromList nm)
      nm = b : [escapeIdent $ T.pack (symbolVal (Proxy :: Proxy t))]
 
-rtable :: forall a . RecExpr (Rec a) => T.Text -> From (Rec a)
-rtable nm = From $ do
-  let bs = T.encodeUtf8 nm
-      nameBld = EscapeIdentifier bs
-  alias <- B.fromByteString <$> grabName --Alias bs nameBld
-  let r = mkRecExpr (Plain (alias <> B.fromChar '.')) (undefined :: Rec a)
-      q = pure nameBld <> raw " AS " <> (builder alias)
+fieldName :: forall t a . KnownSymbol t => (t ::: a) -> T.Text
+fieldName _ = T.pack $ symbolVal (Proxy :: Proxy t)
 
-  return $ FromQuery q r
-{-# INLINE rtable #-}
+setR :: (KnownSymbol t, IElem (t ::: Expr a) s) => (t ::: Expr a) -> Expr a -> UpdExpr (Rec s)
+setR fld (Expr _ a) = UpdExpr [(fieldName fld, a)]
+
+instance forall a r. (RecExpr (Rec a), r~(Rec a)) => FromItem (Table (Rec a)) (Rec a) where
+  fromItem (Table nm) = From $ do
+    let bs = T.encodeUtf8 nm
+        nameBld = EscapeIdentifier bs
+    alias <- B.fromByteString <$> grabName --Alias bs nameBld
+    let r = mkRecExpr (Plain (alias <> B.fromChar '.')) (undefined :: Rec a)
+        q = pure nameBld <> raw " AS " <> (builder alias)
+    return $ FromQuery q r
+
+
+rupdate :: forall a b . RecExpr a => Table a -> (a -> Updating a b) -> Update b
+rupdate (Table nm) f = Update $ do
+  alias <- B.fromByteString <$> grabName
+  let r = mkRecExpr (Plain (alias <> B.fromChar '.')) (undefined :: a)
+      q = pure nameBld <> raw " AS " <> (builder alias)
+  compileUpdating q $ f r
+  where
+      nameBld = EscapeIdentifier $ T.encodeUtf8 nm
