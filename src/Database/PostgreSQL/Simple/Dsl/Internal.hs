@@ -61,10 +61,6 @@ fieldSym _ = Proxy
 fieldColumn :: KnownSymbol t => Field v t a -> Text
 fieldColumn f = T.pack . symbolVal $ fieldSym f
 
--- | Parse named field
-takeField :: (KnownSymbol f, FromField a) => (Field v f a) -> RecordParser a
-takeField f = RecordParser ([pure . escapeIdent $ fieldColumn f]) field
-
 type ExprBuilder = DList Action
 
 -- | Adds phantom type to RawExpr
@@ -115,27 +111,19 @@ binOp p op (Expr pa a) (Expr pb b) = Expr p $
 prefOp :: Int -> ExprBuilder -> Expr a -> Expr b
 prefOp p op (Expr pa a) = Expr p $ op <> parenPrec (p < pa) a
 
-quoted :: Builder -> Builder
-quoted bld = B.fromChar '"' <> bld <> B.fromChar '"'
-
-quoted' :: DList Action -> DList Action
-quoted' act = rawC '"' <> act <> rawC '"'
-
 rawC :: Char -> DList Action
 rawC c = D.singleton . Plain $ B.fromChar c
 
 mkAccess :: Rel t -> ExprBuilder -> ExprBuilder
-mkAccess (Rel r) fld = quoted' (pure $ Plain r) <> rawC '.' <> quoted' fld
-mkAccess (RelTable r) fld =  quoted' (pure $ Plain r) <> rawC '.' <> quoted' fld
-mkAccess (RelAliased r ) fld = pure (Plain r) <> rawC '.' <> fld
+mkAccess (RelTable r) fld =  r <> rawC '.' <> fld
+mkAccess (RelAliased r ) fld = r <> rawC '_' <> fld
 
 
 commaSep :: [ExprBuilder] -> ExprBuilder
 commaSep = D.concat . intersperse (D.singleton . Plain $ B.fromChar ',')
 
-data Rel r = Rel Builder
-           | RelTable Builder
-           | RelAliased Builder
+data Rel r = RelTable ExprBuilder
+           | RelAliased ExprBuilder
 
 -- | Source of uniques
 
@@ -170,26 +158,29 @@ instance Applicative RecordParser where
   pure =  RecordParser [] . pure
   RecordParser cf f <*> RecordParser ca a = RecordParser (cf <> ca) (f <*> a)
 
-recField :: FromField a => Expr t -> RecordParser a
+recField :: FromField a => Expr a -> RecordParser a
 recField (Expr _ e) = RecordParser [e] field
+
+takeField :: FromField a => Expr a -> RecordParser a
+takeField = recField
 
 class FromRecord a b where
   fromRecord :: a -> RecordParser b
 
 instance (FromRecord (Rel a) a) => IsRecord (Rel a) where
-  asRenamed (RelTable nm) = do
-    nm' <- grabAlias nm
-    return $ RelAliased nm'
-  asRenamed (Rel nm) = return $ RelAliased nm
+  asRenamed (RelTable _) = do
+    nm' <- newName_
+    return . RelAliased $ builder nm'
+--  asRenamed (RelAliased nm) = return $ RelAliased nm
   asRenamed a = return a
   asValues rel = recordColumns $ (fromRecord rel :: RecordParser a)
 
-instance IsRecord (Expr (Only a)) where
+instance IsRecord (Expr a) where
   asValues (Expr _ a) = [a]
   asRenamed _ = liftM term newName
 
-instance (FromField a) => FromRecord (Expr (Only a)) a where
-  fromRecord e = recField e
+instance (FromField a) => FromRecord (Expr a) a where
+  fromRecord (Expr p e) = recField $ Expr p e
 
 instance IsRecord (Expr a, Expr b) where
   asValues (Expr _ a, Expr _ b) = [a,b]
@@ -304,7 +295,7 @@ class IsRecord (AggRecord a) => IsAggregate a where
   compileGroupBy :: a -> [ExprBuilder]
 
 data ExprA a = ExprGrp ExprBuilder
-                | ExprAgg ExprBuilder
+             | ExprAgg ExprBuilder
 
 aggrBld :: ExprA t -> ExprBuilder
 aggrBld (ExprGrp b) = b
@@ -314,8 +305,8 @@ compAgg :: ExprA t -> Maybe ExprBuilder
 compAgg (ExprGrp b) = Just b
 compAgg _ = Nothing
 
-instance IsAggregate (ExprA (Only a)) where
-  type AggRecord (ExprA (Only a)) = Expr (Only a)
+instance IsAggregate (ExprA a) where
+  type AggRecord (ExprA a) = Expr a
   fromAggr = term . aggrBld
   compileGroupBy (ExprGrp b) = [b]
   compileGroupBy _ = []
@@ -397,7 +388,7 @@ grabName = do
 {-# INLINE grabName #-}
 
 newExpr :: HasNameSource m => m (Expr a)
-newExpr = liftM (term . builder . quoted) $ grabAlias (B.fromByteString "field.")
+newExpr = liftM (term . builder)  $ newName_
 {-# INLINE newExpr #-}
 
 newName_ :: HasNameSource m => m Builder
@@ -565,8 +556,8 @@ instance FromItem (Table (Rel r)) (Rel r) where
   fromItem (Table nm) = From $ do
     let bs = T.encodeUtf8 nm
         nameBld = B.fromByteString bs
-    alias <- grabAlias nameBld
-    return $ FromTable bs alias (RelAliased alias)
+    alias <- newName_
+    return $ FromTable bs alias (RelTable $ builder alias)
 
 instance (IsRecord a) => FromItem (Query a) a where
   fromItem mq = From $ do
@@ -651,13 +642,13 @@ newtype Inserting r a = Inserting { runInserting :: QueryM [(Text, ExprBuilder)]
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
-compileInserting :: Action -> QueryState [(Text, ExprBuilder)] -> Update ()
+compileInserting :: ExprBuilder -> QueryState [(Text, ExprBuilder)] -> Update ()
 compileInserting table q = Update $ do
   let (cols, exprs) = unzip $ queryAction q
       withPart = queryStateWith q
       compiledSel = finishIt exprs $ q { queryStateWith = mempty }
       res = opt (raw "\nWITH " `fprepend` withPart)
-            <> (D.fromList [plain "\nINSERT INTO ", table, plain "("])
+            <> raw "\nINSERT INTO " <> table <> raw "("
             <> (commaSep (map (pure . escapeIdent) cols) `D.snoc` plain ") (")
             <> (compiledSel `D.snoc` plain ")")
   modify $ \st -> st { queryAction = res }
@@ -697,11 +688,11 @@ finishUpdating table QueryState{..} =
     sets = raw "(" <> commaSep (map (pure . escapeIdent) columns) <> raw ")=(" <> commaSep exprs <> raw ")"
 
 
-compileDeleting :: Action -> Deleting t b -> Update b
+compileDeleting :: ExprBuilder -> Deleting t b -> Update b
 compileDeleting table (Deleting del) = Update $ do
    (r, q) <- compIt del
    let bld = opt (raw "\nWITH " `fprepend` queryStateWith q)
-           <> (raw "\nDELETE FROM " `D.snoc`  table)
+           <> (raw "\nDELETE FROM " <> table)
            <> opt (raw "\nUSING " `fprepend` queryStateFrom q)
            <> opt (raw "\nWHERE " `fprepend` queryStateWhere q)
    modify $ \st -> st { queryAction = bld }

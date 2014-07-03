@@ -20,6 +20,7 @@ library
      Database.PostgreSQL.Simple.Dsl
      Database.PostgreSQL.Simple.Dsl.Record
      Database.PostgreSQL.Simple.Dsl.Query
+     Database.PostgreSQL.Simple.Dsl.Functions
      Database.PostgreSQL.Simple.Dsl.IntArray
      Database.PostgreSQL.Simple.Dsl.Internal
   other-modules:

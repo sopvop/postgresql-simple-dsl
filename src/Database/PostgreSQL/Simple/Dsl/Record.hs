@@ -27,6 +27,7 @@ module Database.PostgreSQL.Simple.Dsl.Record
   , rOver
   , rupdate
   , setR
+  , (.>)
   ) where
 
 import           GHC.TypeLits
@@ -220,3 +221,8 @@ rupdate (Table nm) f = Update $ do
   compileUpdating q $ f r
   where
       nameBld = EscapeIdentifier $ T.encodeUtf8 nm
+
+(.>) :: IElem (t ::: c) rs => Rec rs -> (t ::: c) -> c
+r .> f = rGet f r
+infixl 8 .>
+{-# INLINE (.>) #-}

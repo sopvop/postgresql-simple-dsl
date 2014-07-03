@@ -78,11 +78,11 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , val
      , (==.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
      , true, false, just, isNull, isInList
-     , only
-     , unonly
      , not_
      , exists
      , unsafeCast
+     , unsafeCastA
+     , selectExpr
      , cast
      , array
      , array_append
@@ -101,9 +101,6 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , call
      -- * aggregation
      , aggregate
-     , sum_
-     , count
-     , countAll
      , groupBy
      , from'
      , with'
@@ -124,6 +121,7 @@ import           Data.Int                                (Int64)
 import           Data.Maybe
 import           Data.Monoid
 import           Data.Text                               (Text)
+import qualified Data.Text.Encoding                      as T
 import           Data.Vector                             (Vector)
 import qualified Database.PostgreSQL.LibPQ               as PQ
 import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
@@ -287,6 +285,12 @@ select mq = From $ do
             <> namedRow nm renamed
   return $ FromQuery bld renamed
 
+selectExpr :: Query (Expr a) -> Query (Expr a)
+selectExpr mq = do
+  (r, q) <- compIt mq
+  let bld = ((plain "(" `D.cons` finishIt (asValues r) q) `D.snoc` plain ")")
+  return $ Expr 0 bld
+
 with :: (IsRecord b) => Query b -> (From b -> Query c) -> Query c
 with mq act = do
   (e, q) <- compIt mq
@@ -297,15 +301,17 @@ with mq act = do
   appendWith bld
   act $ From . return $ FromQuery nm renamed
 
-withUpdate :: (IsRecord b, IsQuery m) => Update b -> m b
-withUpdate (Update mq) = do
+withUpdate :: (IsRecord b, IsQuery m) => Update b -> (From b -> m c) -> m c
+withUpdate (Update mq) act = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
   nm <- newName
-  let bld = namedRow nm renamed
-          <> (plain " AS ( "  `D.cons` (queryAction q `D.snoc` plain ")"))
+  let returning = asValues e
+      body = queryAction q <> raw "RETURNING " <> commaSep returning
+      bld = namedRow nm renamed
+          <> (plain " AS ( "  `D.cons` (body `D.snoc` plain ")"))
   appendWith bld
-  return renamed
+  act $ From . return $ FromQuery nm renamed
 
 from :: (IsQuery m, FromItem f a) => f -> m a
 from fr = do
@@ -357,10 +363,10 @@ descendOn (Expr _ a) = Sorting [a <> raw " DESC"]
 
 -- | set LIMIT
 limitTo :: Int -> Query ()
-limitTo = modifyOffset . const . Just
+limitTo = modifyLimit . const . Just
 -- | set OFFSET
 offsetTo :: Int -> Query ()
-offsetTo = modifyLimit . const . Just
+offsetTo = modifyOffset . const . Just
 
 distinct :: Query ()
 distinct = modifyDistinct $ const Distinct
@@ -419,7 +425,7 @@ not_ :: Expr Bool -> Expr Bool
 not_ r = prefOp 17 (raw " NOT ") r
 
 mkAcc :: KnownSymbol t => Rel r -> Field v t a -> Expr b
-mkAcc rel fld = Expr 2 $ mkAccess rel (pure . escapeIdent $ fieldColumn fld)
+mkAcc rel fld = Expr 2 $ mkAccess rel (raw . T.encodeUtf8 $ fieldColumn fld)
 
 infixl 9 ~>, ?>
 (~>) :: (KnownSymbol t) => Rel a -> Field a t b -> Expr b
@@ -438,13 +444,6 @@ isInList a l = binOp 11 (plain " IN ") a (term (lst))
   where
     lst = D.singleton $ toField $ PG.In l
 
--- | Wrap in Only
-only :: Expr a -> Expr (Only a)
-only (Expr p a) = Expr p a
-
-unonly :: Expr (Only a) -> Expr a
-unonly (Expr p a) = Expr p a
-
 true :: Expr Bool
 true = term $ raw "true"
 
@@ -462,6 +461,10 @@ unsafeCast (Expr p r) = Expr p r
 
 cast :: ByteString -> Expr a -> Expr b
 cast t (Expr p b) = Expr 1 $ parenPrec (1 < p) b <> raw "::" <> raw t
+
+unsafeCastA :: ExprA a -> ExprA b
+unsafeCastA (ExprGrp b) = ExprGrp b
+unsafeCastA (ExprAgg b) = ExprGrp b
 
 array :: Expr a -> Expr (Vector a)
 array (Expr _ r) = term $ raw "ARRAY["<> r <> raw "]"
@@ -495,33 +498,28 @@ setFields (UpdExpr x) = Updating $ do
   st <- get
   put st { queryAction = queryAction st <> x }
 
-update :: From (Rel a) -> (Rel a -> Updating a b) -> Update b
-update r f = Update $ do
-  ns <- grabNS
-  let (FromTable nm alias expr, ns') = runState (runFrom r) ns
-  modifyNS $ const ns'
-  compileUpdating (raw nm <> raw " AS " <> builder alias) $ f expr
+update :: Table (Rel a) -> (Rel a -> Updating a b) -> Update b
+update (Table nm) f = Update $ do
+  alias <- newName_
+  let rel = RelTable $ builder alias
+  compileUpdating ( pure (escapeIdent nm) <> raw " AS " <> builder alias) $ f rel
 
-insert :: From (Rel a) -> Query (UpdExpr a) -> Update (Rel a)
-insert r mq = do
-  ns <- grabNS
-  let (FromTable nm _ _, ns') = runState (runFrom r) ns
-      rel = Rel $ B.fromByteString nm
-  modifyNS $ const ns'
+insert :: Table (Rel a) -> Query (UpdExpr a) -> Update (Rel a)
+insert (Table nm) mq = do
+  let rel = RelTable . pure $ escapeIdent nm
   (UpdExpr upd, q) <- compIt mq
-  compileInserting (plain nm) $ q {queryAction = upd}
+  compileInserting (pure $ escapeIdent nm) $ q {queryAction = upd}
   return rel
 
 -- | Delete row from given table
 -- > delete (from users) $ \u -> where & u~>UserKey ==. val uid
 -- turns into
 -- > DELETE FROM users WHERE id ==. 42
-delete :: From (Rel a) -> (Rel a -> Deleting a b) -> Update b
-delete r f = do
-  ns <- grabNS
-  let (FromTable nm alias expr, ns') = runState (runFrom r) ns
-  modifyNS $ const ns'
-  compileDeleting (Plain $ B.fromByteString nm <> B.fromByteString " AS " <> alias) $ f expr
+delete :: Table (Rel a) -> (Rel a -> Deleting a b) -> Update b
+delete (Table nm) f = do
+  alias <- newName_
+  let rel = RelTable $ builder alias
+  compileDeleting (pure (escapeIdent nm) <> raw " AS " <> builder alias) $ f rel
 
 -- | Same as above but table is taken from table class
 -- > deleteFromTable $ \u -> where & u~>UserKey ==. val uid
@@ -585,15 +583,6 @@ aggregate f q = do
 
 groupBy :: Expr a -> ExprA a
 groupBy (Expr _ a) = ExprGrp a
-
-sum_ :: Num a => Expr a -> ExprA Int64
-sum_ (Expr _ a) = ExprAgg (raw "sum(" <> a <> raw ")")
-
-countAll :: ExprA Int64
-countAll = ExprAgg (raw "count(*)")
-
-count :: Expr a -> ExprA Int64
-count (Expr _ a) = ExprAgg $ raw "count(" <> a <> raw ")"
 
 
 checkError :: PQ.Connection -> Maybe a -> IO a
