@@ -26,6 +26,8 @@ module Database.PostgreSQL.Simple.Dsl.Record
   , rSet
   , rOver
   , rupdate
+  , rinsert
+  , rdelete
   , setR
   , (.>)
   ) where
@@ -35,6 +37,8 @@ import           GHC.TypeLits
 import           Control.Applicative
 import           Data.Functor.Identity
 import           Data.Monoid
+import           Data.Foldable
+
 import           Data.Proxy
 import qualified Data.DList as D
 import qualified Data.Text as T
@@ -182,20 +186,19 @@ rOver r f = runIdentity . rLens r (Identity . f)
 {-# INLINE rOver #-}
 
 class RecExpr a where
-  mkRecExpr :: Action -> a -> a
-
+  mkRecExpr :: ExprBuilder -> a -> a
 
 
 instance KnownSymbol t => RecExpr (Rec '[t ::: Expr a]) where
-  mkRecExpr b _ = SField =: (Expr 0 $ D.fromList nm)
-    where nm = b : [escapeIdent $ T.pack (symbolVal (Proxy :: Proxy t))]
+  mkRecExpr b _ = SField =: (Expr 0 nm)
+    where nm = b <> D.fromList [escapeIdent $ T.pack (symbolVal (Proxy :: Proxy t))]
 
 
 instance (KnownSymbol t, RecExpr (Rec b)) => RecExpr (Rec ((t ::: Expr a) ': b)) where
   mkRecExpr b _ = h <+> mkRecExpr b (undefined :: Rec b)
    where
-     h =  SField =: (Expr 0 $ D.fromList nm)
-     nm = b : [escapeIdent $ T.pack (symbolVal (Proxy :: Proxy t))]
+     h =  SField =: (Expr 0 nm)
+     nm = b <> D.fromList [escapeIdent $ T.pack (symbolVal (Proxy :: Proxy t))]
 
 fieldName :: forall t a . KnownSymbol t => (t ::: a) -> T.Text
 fieldName _ = T.pack $ symbolVal (Proxy :: Proxy t)
@@ -208,7 +211,7 @@ instance forall a r. (RecExpr (Rec a), r~(Rec a)) => FromItem (Table (Rec a)) (R
     let bs = T.encodeUtf8 nm
         nameBld = EscapeIdentifier bs
     alias <- B.fromByteString <$> grabName --Alias bs nameBld
-    let r = mkRecExpr (Plain (alias <> B.fromChar '.')) (undefined :: Rec a)
+    let r = mkRecExpr (builder (alias <> B.fromChar '.')) (undefined :: Rec a)
         q = pure nameBld <> raw " AS " <> (builder alias)
     return $ FromQuery q r
 
@@ -216,11 +219,30 @@ instance forall a r. (RecExpr (Rec a), r~(Rec a)) => FromItem (Table (Rec a)) (R
 rupdate :: forall a b . RecExpr a => Table a -> (a -> Updating a b) -> Update b
 rupdate (Table nm) f = Update $ do
   alias <- B.fromByteString <$> grabName
-  let r = mkRecExpr (Plain (alias <> B.fromChar '.')) (undefined :: a)
+  let r = mkRecExpr (builder (alias <> B.fromChar '.')) (undefined :: a)
       q = pure nameBld <> raw " AS " <> (builder alias)
-  compileUpdating q $ f r
+      upd = f r
+  compileUpdating q upd
   where
       nameBld = EscapeIdentifier $ T.encodeUtf8 nm
+
+rdelete :: forall a  b . RecExpr a => Table a -> (a -> Deleting a b) -> Update b
+rdelete (Table nm) f = do
+  alias <- B.fromByteString <$> grabName
+  let r = mkRecExpr (builder (alias <> B.fromChar '.')) (undefined :: a)
+      q = pure nameBld <> raw " AS " <> (builder alias)
+      upd = f r
+  compileDeleting q upd
+  where
+     nameBld = EscapeIdentifier $ T.encodeUtf8 nm
+
+
+rinsert :: forall a b . RecExpr a => Table a -> Query (UpdExpr a) -> Update a
+rinsert (Table nm) mq = do
+  let r = mkRecExpr mempty (undefined :: a)
+  (UpdExpr upd, q) <- compIt mq
+  compileInserting (pure $ escapeIdent nm) $ q {queryAction = upd}
+  return r
 
 (.>) :: IElem (t ::: c) rs => Rec rs -> (t ::: c) -> c
 r .> f = rGet f r

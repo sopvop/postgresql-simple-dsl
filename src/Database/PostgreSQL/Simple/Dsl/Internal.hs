@@ -104,15 +104,24 @@ raw = D.singleton . plain
 rawField :: ToField a => a -> ExprBuilder
 rawField = D.singleton . toField
 
-binOp :: Int -> Action -> Expr a -> Expr b -> Expr c
-binOp p op (Expr pa a) (Expr pb b) = Expr p $
+--binOp :: Int -> Action -> Expr a -> Expr b -> Expr c
+binOp :: IsExpr expr =>Int -> Action -> expr t1 -> expr t -> expr a
+binOp p op ea eb = fromExpr . Expr p $
    parenPrec (p < pa) a <> D.singleton op <> parenPrec (p < pb) b
+  where
+    (Expr pa a) = toExpr ea
+    (Expr pb b) = toExpr eb
+{-# INLINE binOp #-}
 
-prefOp :: Int -> ExprBuilder -> Expr a -> Expr b
-prefOp p op (Expr pa a) = Expr p $ op <> parenPrec (p < pa) a
+prefOp :: IsExpr expr => Int -> ExprBuilder -> expr a -> expr b
+prefOp p op ea = fromExpr . Expr p $ op <> parenPrec (p < pa) a
+  where
+    (Expr pa a) = toExpr ea
+{-# INLINE prefOp #-}
 
 rawC :: Char -> DList Action
 rawC c = D.singleton . Plain $ B.fromChar c
+{-# INLINE rawC #-}
 
 mkAccess :: Rel t -> ExprBuilder -> ExprBuilder
 mkAccess (RelTable r) fld =  r <> rawC '.' <> fld
@@ -251,7 +260,7 @@ class ToRecord a where
   toRecord :: a -> AsRecord a
 
 instance ToField a => ToRecord (Only a) where
-  type AsRecord (Only a) = Expr (Only a)
+  type AsRecord (Only a) = Expr a
   toRecord (Only a) = term $ rawField a
 
 instance (ToField a, ToField b) => ToRecord (a,b) where
@@ -289,68 +298,75 @@ instance (ToRecord a, ToRecord b) => ToRecord (a:.b) where
   type AsRecord (a:.b) = AsRecord a :. AsRecord b
   toRecord (a:.b) = toRecord a :. toRecord b
 
+
+class IsExpr expr where
+  toExpr :: expr a -> Expr a
+  fromExpr :: Expr a -> expr a
+
+instance IsExpr Expr where
+  toExpr = id
+  fromExpr = id
+  {-# INLINE toExpr #-}
+  {-# INLINE fromExpr #-}
+
+instance IsExpr ExprA where
+  toExpr (ExprA a) = a
+  fromExpr = ExprA
+  {-# INLINE toExpr #-}
+  {-# INLINE fromExpr #-}
+
+newtype ExprA a = ExprA { fromExprA :: Expr a }
+
 class IsRecord (AggRecord a) => IsAggregate a where
   type AggRecord a :: *
   fromAggr :: a -> AggRecord a
-  compileGroupBy :: a -> [ExprBuilder]
-
-data ExprA a = ExprGrp ExprBuilder
-             | ExprAgg ExprBuilder
-
-aggrBld :: ExprA t -> ExprBuilder
-aggrBld (ExprGrp b) = b
-aggrBld (ExprAgg b) = b
-
-compAgg :: ExprA t -> Maybe ExprBuilder
-compAgg (ExprGrp b) = Just b
-compAgg _ = Nothing
 
 instance IsAggregate (ExprA a) where
   type AggRecord (ExprA a) = Expr a
-  fromAggr = term . aggrBld
-  compileGroupBy (ExprGrp b) = [b]
-  compileGroupBy _ = []
+  fromAggr = toExpr
 
 instance IsAggregate (ExprA a, ExprA b) where
   type AggRecord (ExprA a, ExprA b) = (Expr a, Expr b)
-  fromAggr (a, b) = (term $ aggrBld a, term $ aggrBld b)
-  compileGroupBy (a,b) = catMaybes [compAgg a, compAgg b]
+  fromAggr (a, b) = (toExpr a, toExpr b)
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c) where
   type AggRecord (ExprA a, ExprA b, ExprA c) = (Expr a, Expr b, Expr c)
-  fromAggr (a, b, c) = (term $ aggrBld a, term $ aggrBld b, term $ aggrBld c)
-  compileGroupBy (a,b,c) = catMaybes [compAgg a, compAgg b, compAgg c]
+  fromAggr (a, b, c) = (toExpr a, toExpr b, toExpr c)
+
 instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d) where
   type AggRecord (ExprA a, ExprA b, ExprA c, ExprA d) = (Expr a, Expr b, Expr c, Expr d)
-  fromAggr (a, b, c, d) = (term $ aggrBld a, term $ aggrBld b, term $ aggrBld c,
-                           term $ aggrBld d)
-  compileGroupBy (a,b,c,d) = catMaybes [compAgg a, compAgg b, compAgg c, compAgg d]
+  fromAggr (a, b, c, d) = (toExpr a, toExpr b, toExpr c,
+                           toExpr d)
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e) where
   type AggRecord (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e) =
        (Expr a, Expr b, Expr c, Expr d, Expr e)
-  fromAggr (a, b, c, d, e) = (term $ aggrBld a, term $ aggrBld b, term $ aggrBld c,
-                           term $ aggrBld d, term $ aggrBld e)
-  compileGroupBy (a,b,c,d,e) = catMaybes [compAgg a, compAgg b, compAgg c, compAgg d
-                                         ,compAgg e]
+  fromAggr (a, b, c, d, e) = (toExpr a, toExpr b, toExpr c,
+                           toExpr d, toExpr e)
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f) where
   type AggRecord (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f) =
        (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f)
-  fromAggr (a, b, c, d, e, f) = (term $ aggrBld a, term $ aggrBld b, term $ aggrBld c,
-                                 term $ aggrBld d, term $ aggrBld e, term $ aggrBld f)
-  compileGroupBy (a,b,c,d,e,f) = catMaybes [compAgg a, compAgg b, compAgg c, compAgg d
-                                           ,compAgg e, compAgg f]
+  fromAggr (a, b, c, d, e, f) = (toExpr a, toExpr b, toExpr c,
+                                 toExpr d, toExpr e, toExpr f)
+
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f, ExprA g) where
   type AggRecord (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f, ExprA g) =
        (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g)
-  fromAggr (a, b, c, d, e, f, g) = (term $ aggrBld a, term $ aggrBld b, term $ aggrBld c,
-                                    term $ aggrBld d, term $ aggrBld e, term $ aggrBld f,
-                                    term $ aggrBld g)
-  compileGroupBy (a,b,c,d,e,f,g) = catMaybes [compAgg a, compAgg b, compAgg c, compAgg d
-                                             ,compAgg e, compAgg f, compAgg g]
+  fromAggr (a, b, c, d, e, f, g) = (toExpr a, toExpr b, toExpr c,
+                                    toExpr d, toExpr e, toExpr f,
+                                    toExpr g)
 
+
+
+{-
+instance IsExpr ExprA where
+  toExpr (ExprGrp a) = Expr 0 a
+  toExpr (ExprAgg a) = Expr 0 a
+  fromExpr (Expr _ a) = ExprAgg a
+  {-# INLINE toExpr #-}
+-}
 
 data Distinct = DistinctAll | Distinct | DistinctOn ExprBuilder
 
@@ -361,6 +377,8 @@ data QueryState t = QueryState
   , queryStateFrom      :: Maybe ExprBuilder
   , queryStateWhere     :: Maybe ExprBuilder
   , queryStateOrder     :: Maybe ExprBuilder
+  , queryStateGroupBy   :: Maybe ExprBuilder
+  , queryStateHaving    :: Maybe ExprBuilder
   , queryStateLimit     :: Maybe Int
   , queryStateOffset    :: Maybe Int
   , queryAction         :: t
@@ -371,7 +389,8 @@ emptyQuery :: Monoid t => QueryState t
 emptyQuery = emptyQueryWith mkNameSource
 
 emptyQueryWith :: Monoid t => NameSource -> QueryState t
-emptyQueryWith = QueryState mempty DistinctAll mempty mempty mempty mempty Nothing Nothing mempty
+emptyQueryWith = QueryState mempty DistinctAll mempty mempty mempty mempty mempty mempty
+                 Nothing Nothing mempty
 
 instance HasNameSource (QueryM t) where
   grabNS = getNameSource
@@ -419,10 +438,6 @@ class (HasNameSource m, Monad m) => IsQuery m where
   modifyWith :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
   modifyFrom :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
   modifyWhere :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
-  modifyRecursive :: (Bool -> Bool) -> m ()
-  modifyDistinct :: (Distinct -> Distinct) -> m ()
-  modifyLimit :: (Maybe Int -> Maybe Int) -> m ()
-  modifyOffset :: (Maybe Int -> Maybe Int) -> m ()
   modifyNameSource :: (NameSource -> NameSource) -> m ()
   getNameSource :: m NameSource
 
@@ -438,24 +453,11 @@ instance IsQuery (QueryM t) where
   modifyWhere f = do
     st <- get
     put $ st { queryStateWhere = f (queryStateWhere st ) }
-  modifyRecursive f = do
-    st <- get
-    put $ st { queryStateRecursive = Any $ f (getAny $ queryStateRecursive st ) }
-  modifyLimit f = do
-    st <- get
-    put $ st { queryStateLimit = f (queryStateLimit st) }
-
-  modifyDistinct f = do
-    st <- get
-    put $ st { queryStateDistinct = f (queryStateDistinct st) }
-
-  modifyOffset f = do
-    st <- get
-    put $ st { queryStateOffset = f (queryStateOffset st) }
 
   modifyNameSource f = do
     st <- get
     put $ st { queryNameSource = f (queryNameSource st) }
+
   getNameSource = do
     st <- get
     return $ queryNameSource st
@@ -463,12 +465,28 @@ instance IsQuery (QueryM t) where
   {-# INLINE modifyWith #-}
   {-# INLINE modifyFrom #-}
   {-# INLINE modifyWhere #-}
-  {-# INLINE modifyRecursive #-}
-  {-# INLINE modifyDistinct #-}
-  {-# INLINE modifyLimit #-}
-  {-# INLINE modifyOffset #-}
   {-# INLINE modifyNameSource #-}
   {-# INLINE getNameSource #-}
+
+modifyLimit f = do
+   st <- get
+   put $ st { queryStateLimit = f (queryStateLimit st) }
+
+modifyOffset f = do
+   st <- get
+   put $ st { queryStateOffset = f (queryStateOffset st) }
+
+modifyDistinct f = do
+   st <- get
+   put $ st { queryStateDistinct = f (queryStateDistinct st) }
+{-# INLINE modifyDistinct #-}
+{-# INLINE modifyLimit #-}
+{-# INLINE modifyOffset #-}
+
+modifyRecursive f = do
+  st <- get
+  put $ st { queryStateRecursive = Any $ f (getAny $ queryStateRecursive st ) }
+{-# INLINE modifyRecursive #-}
 
 appendWith :: IsQuery m => ExprBuilder -> m ()
 appendWith act = modifyWith $ \w ->
@@ -503,12 +521,22 @@ compIt (QueryM a) = do
   return (res, st')
 {-# INLINE compIt #-}
 
-finishIt :: [ExprBuilder] -> QueryState t -> ExprBuilder
-finishIt expr q = finishItAgg expr Nothing q
-{-# INLINE finishIt #-}
+newtype Aggregator a = Aggregator { runAggregator :: Query a }
+        deriving (Functor, Applicative, Monad, HasNameSource)
 
-finishItAgg :: [ExprBuilder] -> Maybe (ExprBuilder) -> QueryState t -> ExprBuilder
-finishItAgg expr groupBy QueryState{..} = execWriter $ do
+appendHaving :: ExprBuilder -> Aggregator ()
+appendHaving e = Aggregator . modify $ \st ->
+      st { queryStateHaving = (queryStateHaving st `fappend` raw " AND ") <> Just e }
+{-# INLINE appendHaving #-}
+
+appendGroupBy :: ExprBuilder -> Aggregator ()
+appendGroupBy e = Aggregator . modify $ \st ->
+   st { queryStateGroupBy = (queryStateGroupBy st `fappend` rawC ',') <> Just e }
+
+{-# INLINE appendGroupBy #-}
+
+finishIt :: [ExprBuilder] -> QueryState t -> ExprBuilder
+finishIt expr QueryState{..} = execWriter $ do
   forM_ queryStateWith $ \w -> tell (plain withStart `D.cons` w)
   tell $ pure (plain "\nSELECT ")
   tell $ distinct queryStateDistinct
@@ -516,8 +544,10 @@ finishItAgg expr groupBy QueryState{..} = execWriter $ do
   forM_ queryStateFrom $ \f -> tell (plain "\nFROM " `D.cons` f)
   forM_ queryStateWhere $ \w -> tell (plain "\nWHERE " `D.cons` w)
   forM_ queryStateOrder $ \o -> tell (plain "\nORDER BY " `D.cons` o)
-  forM_ groupBy $ \b -> do
+  forM_ queryStateGroupBy $ \b -> do
      tell $ plain "\nGROUP BY " `D.cons` b
+  forM_ queryStateHaving $ \b -> do
+     tell $ plain "\nHAVING " `D.cons` b
   forM_ queryStateLimit $ \l -> do
      tell $ D.fromList [plain "\nLIMIT ", toField l]
   forM_ queryStateOffset $ \o -> do
@@ -555,7 +585,6 @@ instance FromItem (From a) a where
 instance FromItem (Table (Rel r)) (Rel r) where
   fromItem (Table nm) = From $ do
     let bs = T.encodeUtf8 nm
-        nameBld = B.fromByteString bs
     alias <- newName_
     return $ FromTable bs alias (RelTable $ builder alias)
 
@@ -569,12 +598,12 @@ instance (IsRecord a) => FromItem (Query a) a where
      return $ FromQuery bld renamed
 
 
-fromExpr :: FromD a -> a
-fromExpr (FromTable _ _ a) = a
-fromExpr (FromQuery _ a) = a
-fromExpr (FromInnerJoin a b _) = fromExpr a :. fromExpr b
-fromExpr (FromCrossJoin a b) = fromExpr a :. fromExpr b
-{-# INLINE fromExpr #-}
+fromToExpr :: FromD a -> a
+fromToExpr (FromTable _ _ a) = a
+fromToExpr (FromQuery _ a) = a
+fromToExpr (FromInnerJoin a b _) = fromToExpr a :. fromToExpr b
+fromToExpr (FromCrossJoin a b) = fromToExpr a :. fromToExpr b
+{-# INLINE fromToExpr #-}
 
 newtype From a = From { runFrom :: State NameSource (FromD a) }
 
@@ -630,16 +659,17 @@ compileSorting (Sorting r) = mconcat $ intersperse (raw ",") r
 {-# INLINE compileSorting #-}
 
 newtype UpdExpr a = UpdExpr { getUpdates :: [(Text, ExprBuilder)] }
+
 instance Monoid (UpdExpr a) where
   mempty = UpdExpr mempty
   UpdExpr a `mappend` UpdExpr b = UpdExpr (a<>b)
 
 newtype Update a = Update { runUpdate :: QueryM (ExprBuilder) a }
-   deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
+   deriving (Functor, Applicative, Monad, HasNameSource)
 
 
 newtype Inserting r a = Inserting { runInserting :: QueryM [(Text, ExprBuilder)] a }
-   deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
+   deriving (Functor, Applicative, Monad, HasNameSource)
 
 
 compileInserting :: ExprBuilder -> QueryState [(Text, ExprBuilder)] -> Update ()
@@ -661,8 +691,8 @@ finishUpdate recParser (Update (QueryM u)) = (result, parser)
     result = (queryAction bld `D.snoc` plain "\nRETURNING ") <> commaSep cols
 
 compileUpdate :: (IsRecord t) => Update t -> ExprBuilder
-compileUpdate (Update (QueryM u)) = (queryAction bld `D.snoc` plain "\nRETURNING ")
-                                    <> (commaSep $ asValues expr)
+compileUpdate (Update (QueryM u)) =
+    queryAction bld <> raw "\nRETURNING " <> commaSep (asValues expr)
   where
     (expr, bld) = runState u emptyQuery
 
@@ -728,9 +758,11 @@ call (Function bs args) = Expr 10 $
    D.singleton (escapeIdent bs) <> raw "(" <> commaSep args <> raw ")"
 
 callAgg :: Function t -> ExprA a
-callAgg (Function bs args) = ExprAgg $
+callAgg (Function bs args) = ExprA . Expr 0 $
    (D.singleton $ escapeIdent bs) <> raw "(" <> commaSep args <> raw ")"
 
 data Union = UnionDistinct | UnionAll deriving (Eq, Show, Ord)
 
 data Recursive a = Recursive Union (Query a) (From a -> Query a)
+
+

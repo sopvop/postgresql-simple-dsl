@@ -17,8 +17,9 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , Field
      , RecordParser
      , recordRowParser
-
+     , IsExpr
      -- * Exequting queries
+     , IsQuery
      , Query
      , query
      , queryWith
@@ -67,6 +68,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , (=.!)
      , setField
      , setFields
+     , returning
      -- * Executing updates
      , queryUpdate
      , queryUpdateWith
@@ -81,13 +83,8 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , not_
      , exists
      , unsafeCast
-     , unsafeCastA
      , selectExpr
      , cast
-     , array
-     , array_append
-     , array_prepend
-     , array_cat
      -- * Helpers
      , Only(..)
      , (:.)(..)
@@ -101,6 +98,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , call
      -- * aggregation
      , aggregate
+     , having
      , groupBy
      , from'
      , with'
@@ -122,7 +120,6 @@ import           Data.Maybe
 import           Data.Monoid
 import           Data.Text                               (Text)
 import qualified Data.Text.Encoding                      as T
-import           Data.Vector                             (Vector)
 import qualified Database.PostgreSQL.LibPQ               as PQ
 import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
                                                           Only (..))
@@ -330,7 +327,7 @@ innerJoin :: forall a b .(IsRecord a, IsRecord b) =>
 innerJoin (From mfa) (From mfb) f = From $ do
     fa <- mfa
     fb <- mfb
-    let Expr _ onexpr = f (fromExpr fa) (fromExpr fb)
+    let Expr _ onexpr = f (fromToExpr fa) (fromToExpr fb)
     return $ FromInnerJoin fa fb onexpr
 
 -- | Cross join
@@ -339,10 +336,11 @@ crossJoin fa fb = From $ FromCrossJoin <$> runFrom (fromItem fa)
                                        <*> runFrom (fromItem fb)
 {-# INLINE crossJoin #-}
 
-exists :: IsRecord a => Query a -> Expr Bool
-exists mq = term $ D.fromList . toList $ (plain " EXISTS (" `D.cons` body) `D.snoc` plain ")"
-  where
-    body = compileQuery mq
+exists :: IsRecord a => Query a -> Query (Expr Bool)
+exists mq = do
+    (r, q') <- compIt mq
+    let body = finishIt (asValues r) q'
+    return . term $ D.fromList . toList $ (plain " EXISTS (" `D.cons` body) `D.snoc` plain ")"
 
 -- | append to ORDER BY clase
 orderBy :: Sorting -> Query ()
@@ -398,57 +396,60 @@ val = term . rawField
 
 infix 4 ==., <., <=., >., >=.
 
-(==.) :: Expr a -> Expr a -> Expr Bool
+(==.) :: IsExpr expr => expr a -> expr a -> expr Bool
 a ==. b = binOp 15 (plain "=") a b
 
-(>.) :: Expr a -> Expr a -> Expr Bool
+
+(>.) :: IsExpr expr => expr a -> expr a -> expr Bool
 a >. b = binOp 15 (plain ">") a b
 
-(>=.) :: Expr a -> Expr a -> Expr Bool
+(>=.) :: IsExpr expr => expr a -> expr a -> expr Bool
 a >=. b = binOp 15 (plain ">=") a b
 
-(<.) :: Expr a -> Expr a -> Expr Bool
+(<.) :: IsExpr expr => expr a -> expr a -> expr Bool
 a <. b = binOp 15 (plain "<") a b
 
-(<=.) :: Expr a -> Expr a ->  Expr Bool
+(<=.) :: IsExpr expr => expr a -> expr a -> expr Bool
 a <=. b = binOp 15 (plain "<=") a b
 
 infixr 3 &&.
-(&&.), (||.) :: Expr Bool -> Expr Bool -> Expr Bool
+(&&.), (||.) :: IsExpr expr => expr Bool -> expr Bool -> expr Bool
 a &&. b = binOp 18 (plain " AND ") a b
 
 infixr 2 ||.
 a ||. b = binOp 19 (plain " OR ") a b
 
 -- | Access field of relation
-not_ :: Expr Bool -> Expr Bool
+not_ :: IsExpr expr => expr Bool -> expr Bool
 not_ r = prefOp 17 (raw " NOT ") r
 
-mkAcc :: KnownSymbol t => Rel r -> Field v t a -> Expr b
-mkAcc rel fld = Expr 2 $ mkAccess rel (raw . T.encodeUtf8 $ fieldColumn fld)
+mkAcc :: (IsExpr expr, KnownSymbol t1) => Rel t -> Field v t1 a1 -> expr a
+mkAcc rel fld = fromExpr . Expr 2 $ mkAccess rel (raw . T.encodeUtf8 $ fieldColumn fld)
 
 infixl 9 ~>, ?>
 (~>) :: (KnownSymbol t) => Rel a -> Field a t b -> Expr b
 (~>) = mkAcc
 
-(?>) :: (KnownSymbol t) => Rel (Maybe a) -> Field a t b -> Expr (Maybe b)
+(?>) :: (KnownSymbol t, IsExpr expr) => Rel (Maybe a) -> Field a t b -> expr (Maybe b)
 (?>) = mkAcc
 
 -- | like operator
 (~.) :: Expr Text -> Expr Text -> Expr Bool
 (~.) a b = binOp 14 (plain " ~ ") a b
 
-isInList :: ToField a => (Expr a) -> [a] -> Expr Bool
+isInList :: (IsExpr expr, ToField a) => expr a -> [a] -> expr Bool
 isInList _ [] = false
-isInList a l = binOp 11 (plain " IN ") a (term (lst))
+isInList a l = binOp 11 (plain " IN ") a (fromExpr $ term (lst))
   where
     lst = D.singleton $ toField $ PG.In l
 
-true :: Expr Bool
-true = term $ raw "true"
+true :: IsExpr expr => expr Bool
+true = fromExpr . term $ raw "true"
+{-# INLINE true #-}
 
-false :: Expr Bool
-false = term $ raw "true"
+false :: IsExpr expr => expr Bool
+false = fromExpr . term $ raw "true"
+{-# INLINE false #-}
 
 just :: Expr a -> Expr (Maybe a)
 just (Expr p r) = Expr p r
@@ -459,26 +460,11 @@ isNull r = binOp 7 (plain " IS ") r (term $ raw "NULL")
 unsafeCast :: Expr a -> Expr b
 unsafeCast (Expr p r) = Expr p r
 
-cast :: ByteString -> Expr a -> Expr b
-cast t (Expr p b) = Expr 1 $ parenPrec (1 < p) b <> raw "::" <> raw t
-
-unsafeCastA :: ExprA a -> ExprA b
-unsafeCastA (ExprGrp b) = ExprGrp b
-unsafeCastA (ExprAgg b) = ExprGrp b
-
-array :: Expr a -> Expr (Vector a)
-array (Expr _ r) = term $ raw "ARRAY["<> r <> raw "]"
-
-array_append :: Expr (Vector a) -> Expr a -> Expr (Vector a)
-array_append (Expr _ arr) (Expr _ v) = Expr 0 $ raw "array_append("
-             <> arr <> raw "," <> v <> raw ")"
-
-array_prepend :: Expr a -> Expr (Vector a) -> Expr (Vector a)
-array_prepend (Expr _ v) (Expr _ arr) = Expr 0 $
-  raw "array_prepend(" <> v <> raw "," <> arr <> raw ")"
-array_cat :: Expr (Vector a) -> Expr (Vector a) -> Expr (Vector a)
-array_cat (Expr _ a) (Expr _ b) = Expr 0 $
-  raw "array_cat(" <> a <> raw "," <> b <> raw ")"
+cast :: IsExpr expr => ByteString -> expr a -> expr b
+cast t eb = fromExpr $ Expr 1 $ parenPrec (1 < p) b <> raw "::" <> raw t
+  where
+    (Expr p b) = toExpr eb
+{-# INLINE cast #-}
 
 infixr 7 =., =.!
 (=.) :: forall v t a. (KnownSymbol t) => Field v t a -> Expr a -> UpdExpr v
@@ -567,7 +553,7 @@ compileUnion un q f = do
          UnionDistinct -> plain " UNION "
          UnionAll      -> plain " UNION ALL "
 {-# INLINE compileUnion #-}
-
+{-
 aggregate :: (IsRecord a, IsAggregate b) => (a -> b) -> Query a -> Query (AggRecord b)
 aggregate f q = do
     (r, q') <- compIt q
@@ -580,10 +566,20 @@ aggregate f q = do
     renamed <- asRenamed resExpr
     appendFrom $ (plain "(" `D.cons` (compiled `D.snoc` plain ") AS ")) <> namedRow nm renamed
     return renamed
+-}
+aggregate :: IsAggregate b => (a -> Aggregator b) -> Query a -> Query (AggRecord b)
+aggregate f q = do
+    r <- q
+    let Aggregator aggQ = f r
+    fmap fromAggr aggQ
 
-groupBy :: Expr a -> ExprA a
-groupBy (Expr _ a) = ExprGrp a
+groupBy :: Expr a -> Aggregator (ExprA a)
+groupBy e@(Expr _ b) = do
+  appendGroupBy b
+  return $ ExprA e
 
+having :: ExprA Bool -> Aggregator ()
+having (ExprA (Expr _ a)) = appendHaving a
 
 checkError :: PQ.Connection -> Maybe a -> IO a
 checkError _ (Just x) = return x
@@ -657,3 +653,7 @@ exists' mq = term $ D.fromList . toList $ (plain " EXISTS (" `D.cons` body) `D.s
   where
     body = compileQuery mq
 
+returning :: (t -> a) -> Update t -> Update a
+returning f (Update m) = Update $ do
+  expr <- m
+  return $ f expr
