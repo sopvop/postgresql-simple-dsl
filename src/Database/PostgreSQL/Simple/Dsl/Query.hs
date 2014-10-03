@@ -115,6 +115,7 @@ import           Data.Foldable                           (foldlM, toList)
 import           Blaze.ByteString.Builder                as B
 import           Data.ByteString                         (ByteString)
 import qualified Data.DList                              as D
+import qualified Data.HashMap.Strict                     as HashMap
 import           Data.Int                                (Int64)
 import           Data.Maybe
 import           Data.Monoid
@@ -123,6 +124,7 @@ import qualified Data.Text.Encoding                      as T
 import qualified Database.PostgreSQL.LibPQ               as PQ
 import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
                                                           Only (..))
+
 import qualified Database.PostgreSQL.Simple              as PG
 import           Database.PostgreSQL.Simple.Dsl.Internal
 import qualified Database.PostgreSQL.Simple.Internal     as PG
@@ -468,7 +470,7 @@ cast t eb = fromExpr $ Expr 1 $ parenPrec (1 < p) b <> raw "::" <> raw t
 
 infixr 7 =., =.!
 (=.) :: forall v t a. (KnownSymbol t) => Field v t a -> Expr a -> UpdExpr v
-f =. (Expr _ a) = UpdExpr [(fieldColumn f, a)]
+f =. (Expr _ a) = UpdExpr $ HashMap.singleton (fieldColumn f) a
 
 (=.!) :: (KnownSymbol t, ToField a) => Field v t a -> a -> UpdExpr v
 (=.!) f e = f =. val e
@@ -494,7 +496,7 @@ insert :: Table (Rel a) -> Query (UpdExpr a) -> Update (Rel a)
 insert (Table nm) mq = do
   let rel = RelTable . pure $ escapeIdent nm
   (UpdExpr upd, q) <- compIt mq
-  compileInserting (pure $ escapeIdent nm) $ q {queryAction = upd}
+  compileInserting (pure $ escapeIdent nm) $ q {queryAction = HashMap.toList upd}
   return rel
 
 -- | Delete row from given table
@@ -657,3 +659,4 @@ returning :: (t -> a) -> Update t -> Update a
 returning f (Update m) = Update $ do
   expr <- m
   return $ f expr
+

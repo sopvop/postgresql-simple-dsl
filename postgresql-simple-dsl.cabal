@@ -25,16 +25,18 @@ library
      Database.PostgreSQL.Simple.Dsl.Internal
   other-modules:
   -- other-extensions:
-  build-depends:       base >=4.7 && <5,
-                       postgresql-simple,
-                       postgresql-libpq,
-                       dlist,
-                       blaze-builder,
-                       bytestring,
-                       transformers,
-                       text,
-                       mtl,
-                       time
+  build-depends: base >= 4.7 && < 5
+               , blaze-builder
+               , bytestring
+               , dlist
+               , mtl
+               , postgresql-libpq
+               , postgresql-simple
+               , text
+               , time
+               , transformers
+               , unordered-containers
+
   hs-source-dirs:      src
   default-language:    Haskell2010
   ghc-options: -funbox-strict-fields -O2 -Wall -fwarn-tabs 
@@ -44,11 +46,12 @@ benchmark basic
   hs-source-dirs: benchmarks
   main-is: Basic.hs
   type: exitcode-stdio-1.0
-  build-depends: base >= 4.6 && < 5,
-                 postgresql-simple-dsl,
-                 postgresql-simple,
-                 criterion,
-                 bytestring
+  build-depends: base >= 4.7 && < 5
+               , bytestring
+               , criterion
+               , postgresql-simple
+               , postgresql-simple-dsl
+               , unordered-containers
   default-language: Haskell2010
   ghc-options: -funbox-strict-fields -O2 -Wall -fwarn-tabs -rtsopts 
 -- -auto-all -caf-all

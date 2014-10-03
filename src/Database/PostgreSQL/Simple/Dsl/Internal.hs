@@ -29,8 +29,9 @@ import qualified Data.ByteString.Char8                as B
 import           Data.DList                           (DList)
 import qualified Data.DList                           as D
 import           Data.Foldable
+import           Data.HashMap.Strict                  (HashMap)
+import qualified Data.HashMap.Strict                  as HashMap
 import           Data.List                            (intersperse)
-import           Data.Maybe                           (catMaybes)
 import           Data.Monoid
 import           Data.Proxy                           (Proxy (..))
 import           Data.Text                            (Text)
@@ -468,14 +469,17 @@ instance IsQuery (QueryM t) where
   {-# INLINE modifyNameSource #-}
   {-# INLINE getNameSource #-}
 
+modifyLimit :: MonadState (QueryState t) m => (Maybe Int -> Maybe Int) -> m ()
 modifyLimit f = do
    st <- get
    put $ st { queryStateLimit = f (queryStateLimit st) }
 
+modifyOffset :: MonadState (QueryState t) m => (Maybe Int -> Maybe Int) -> m ()
 modifyOffset f = do
    st <- get
    put $ st { queryStateOffset = f (queryStateOffset st) }
 
+modifyDistinct  :: MonadState (QueryState t) m => (Distinct -> Distinct) -> m ()
 modifyDistinct f = do
    st <- get
    put $ st { queryStateDistinct = f (queryStateDistinct st) }
@@ -483,6 +487,7 @@ modifyDistinct f = do
 {-# INLINE modifyLimit #-}
 {-# INLINE modifyOffset #-}
 
+modifyRecursive :: MonadState (QueryState t) m => (Bool -> Bool) -> m ()
 modifyRecursive f = do
   st <- get
   put $ st { queryStateRecursive = Any $ f (getAny $ queryStateRecursive st ) }
@@ -658,7 +663,7 @@ compileSorting :: Sorting -> ExprBuilder
 compileSorting (Sorting r) = mconcat $ intersperse (raw ",") r
 {-# INLINE compileSorting #-}
 
-newtype UpdExpr a = UpdExpr { getUpdates :: [(Text, ExprBuilder)] }
+newtype UpdExpr a = UpdExpr { getUpdates :: HashMap Text ExprBuilder }
 
 instance Monoid (UpdExpr a) where
   mempty = UpdExpr mempty
@@ -702,11 +707,11 @@ finishUpdateNoRet (Update (QueryM u)) = finish $ runState u emptyQuery
     finish (_, bld) = queryAction bld
 
 
-newtype Updating r a = Updating { runUpdating :: QueryM [(Text, ExprBuilder)] a }
+newtype Updating r a = Updating { runUpdating :: QueryM (HashMap Text ExprBuilder) a }
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
-finishUpdating :: ExprBuilder -> QueryState [(Text, ExprBuilder)] -> ExprBuilder
+finishUpdating :: ExprBuilder -> QueryState (HashMap Text ExprBuilder) -> ExprBuilder
 finishUpdating table QueryState{..} =
          opt (raw "\nWITH " `fprepend` queryStateWith)
          <> raw "\nUPDATE " <> table <> raw "\nSET "
@@ -714,7 +719,7 @@ finishUpdating table QueryState{..} =
          <> opt (raw "\nFROM " `fprepend` queryStateFrom)
          <> opt (raw "\nWHERE " `fprepend` queryStateWhere)
   where
-    (columns, exprs) = unzip queryAction
+    (columns, exprs) = unzip $ HashMap.toList queryAction
     sets = raw "(" <> commaSep (map (pure . escapeIdent) columns) <> raw ")=(" <> commaSep exprs <> raw ")"
 
 

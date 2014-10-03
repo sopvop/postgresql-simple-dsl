@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE DataKinds             #-}
@@ -30,6 +31,11 @@ module Database.PostgreSQL.Simple.Dsl.Record
   , rdelete
   , setR
   , (.>)
+  , Updater
+  , UpdaterM
+  , mkUpdate
+  , setU
+  , setVal
   ) where
 
 import           GHC.TypeLits
@@ -38,6 +44,8 @@ import           Control.Applicative
 import           Data.Functor.Identity
 import           Data.Monoid
 import           Data.Foldable
+import           Control.Monad.Trans.State.Strict        (State, execState, modify)
+import qualified Data.HashMap.Strict                     as HashMap
 
 import           Data.Proxy
 import qualified Data.DList as D
@@ -140,6 +148,20 @@ instance Implicit (Elem x xs) => Implicit (Elem x (y ': xs)) where
 
 type IElem x xs = Implicit (Elem x xs)
 
+{-
+class (xs :: [*]) <: (ys :: [*]) where
+  cast :: Rec xs -> Rec ys
+
+instance xs <: '[] where
+  cast _ = RNil
+
+instance (y ~ (t ::: a), IElem y xs) => xs <: (y ': ys) where
+  cast xs = ith (implicitly :: Elem y xs) xs <+> cast xs
+    where
+      ith :: Elem y rs -> Rec rs -> Rec (y ': '[])
+      ith Here (a :& _) = SField =: a
+      ith (There p) (_ :& as) = ith p as
+-}
 -- | Make a Lens' from field
 rLens :: forall t a rs r g .(Functor g, r ~ (t ::: a), IElem r rs) =>
        r -> (a -> g a) -> Rec rs -> g (Rec rs)
@@ -204,7 +226,7 @@ fieldName :: forall t a . KnownSymbol t => (t ::: a) -> T.Text
 fieldName _ = T.pack $ symbolVal (Proxy :: Proxy t)
 
 setR :: (KnownSymbol t, IElem (t ::: Expr a) s) => (t ::: Expr a) -> Expr a -> UpdExpr (Rec s)
-setR fld (Expr _ a) = UpdExpr [(fieldName fld, a)]
+setR fld (Expr _ a) = UpdExpr $ HashMap.singleton (fieldName fld) a
 
 instance forall a r. (RecExpr (Rec a), r~(Rec a)) => FromItem (Table (Rec a)) (Rec a) where
   fromItem (Table nm) = From $ do
@@ -241,10 +263,38 @@ rinsert :: forall a b . RecExpr a => Table a -> Query (UpdExpr a) -> Update a
 rinsert (Table nm) mq = do
   let r = mkRecExpr mempty (undefined :: a)
   (UpdExpr upd, q) <- compIt mq
-  compileInserting (pure $ escapeIdent nm) $ q {queryAction = upd}
+  compileInserting (pure $ escapeIdent nm) $ q {queryAction = HashMap.toList upd}
   return r
 
 (.>) :: IElem (t ::: c) rs => Rec rs -> (t ::: c) -> c
 r .> f = rGet f r
 infixl 8 .>
 {-# INLINE (.>) #-}
+
+newtype UpdaterM t a = UpdaterM (State (HashMap.HashMap T.Text ExprBuilder) a)
+
+instance Functor (UpdaterM t) where
+  fmap f (UpdaterM !a) = UpdaterM $! (fmap f a)
+
+instance Applicative (UpdaterM t) where
+  pure = UpdaterM . pure
+  UpdaterM f <*> UpdaterM v = UpdaterM $! f <*> v
+
+instance Monad (UpdaterM t) where
+  return = pure
+  UpdaterM mv >>= mf = UpdaterM $ do
+    v <- mv
+    let UpdaterM f = mf v
+    f
+
+type Updater t = UpdaterM t ()
+
+mkUpdate :: Updater (Rec a) -> UpdExpr (Rec a)
+mkUpdate (UpdaterM u) = UpdExpr (execState u mempty)
+
+setU :: (KnownSymbol t, IElem (t ::: Expr a) s) => (t ::: Expr a) -> Expr a -> Updater (Rec s)
+setU fld (Expr _ a) = UpdaterM . modify $ HashMap.insert (fieldName fld) a
+
+setVal :: (KnownSymbol t, IElem (t ::: Expr a) s, ToField a)
+       => (t ::: Expr a) -> a -> Updater (Rec s)
+setVal f v = setU f (term $ rawField v)
