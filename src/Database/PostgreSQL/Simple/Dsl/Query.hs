@@ -450,7 +450,7 @@ true = fromExpr . term $ raw "true"
 {-# INLINE true #-}
 
 false :: IsExpr expr => expr Bool
-false = fromExpr . term $ raw "true"
+false = fromExpr . term $ raw "false"
 {-# INLINE false #-}
 
 just :: Expr a -> Expr (Maybe a)
