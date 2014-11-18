@@ -306,7 +306,7 @@ withUpdate (Update mq) act = do
   renamed <- asRenamed e
   nm <- newName
   let returning = asValues e
-      body = queryAction q <> raw "RETURNING " <> commaSep returning
+      body = queryAction q <> raw "\nRETURNING " <> commaSep returning
       bld = namedRow nm renamed
           <> (plain " AS ( "  `D.cons` (body `D.snoc` plain ")"))
   appendWith bld
