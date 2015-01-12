@@ -338,7 +338,7 @@ crossJoin fa fb = From $ FromCrossJoin <$> runFrom (fromItem fa)
                                        <*> runFrom (fromItem fb)
 {-# INLINE crossJoin #-}
 
-exists :: IsRecord a => Query a -> Query (Expr Bool)
+exists :: (IsQuery m) => Query (Expr a) -> m (Expr Bool)
 exists mq = do
     (r, q') <- compIt mq
     let body = finishIt (asValues r) q'
