@@ -1,19 +1,17 @@
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE FunctionalDependencies     #-}
 {-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE MultiParamTypeClasses      #-}
-{-# LANGUAGE NoMonomorphismRestriction  #-}
 {-# LANGUAGE OverloadedStrings          #-}
-{-# LANGUAGE RankNTypes                 #-}
-{-# LANGUAGE RecordWildCards            #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE TypeOperators              #-}
-{-# LANGUAGE TypeSynonymInstances       #-}
-{-# LANGUAGE UndecidableInstances       #-}
+
 
 module Database.PostgreSQL.Simple.Dsl.Internal
        where
@@ -26,6 +24,8 @@ import           Control.Monad.Trans.State            (State, evalState,
 import           Control.Monad.Trans.Writer
 import           Data.ByteString                      (ByteString)
 import qualified Data.ByteString.Char8                as B
+import           Data.Coerce
+import           Control.Monad.Identity
 import           Data.DList                           (DList)
 import qualified Data.DList                           as D
 import           Data.Foldable
@@ -38,11 +38,12 @@ import           Data.Text                            (Text)
 import qualified Data.Text                            as T
 import qualified Data.Text.Encoding                   as T
 
+import           Data.Vinyl.Core (Rec(..), (<+>), rappend)
 
-
-import           Blaze.ByteString.Builder             (Builder)
 import           Blaze.ByteString.Builder.ByteString  as B
 import           Blaze.ByteString.Builder.Char8       as B
+
+import           Data.ByteString.Builder (Builder, byteStringHex, char8, byteString)
 
 import           GHC.TypeLits                         (KnownSymbol, Symbol,
                                                        symbolVal)
@@ -51,6 +52,8 @@ import           Database.PostgreSQL.Simple           ((:.) (..), Only (..))
 import           Database.PostgreSQL.Simple.FromField as PG hiding (Field)
 import           Database.PostgreSQL.Simple.FromRow   as PG
 import           Database.PostgreSQL.Simple.ToField
+
+import           Database.PostgreSQL.Simple.Dsl.Types
 
 
 -- | Class for entities which have columns
@@ -62,7 +65,8 @@ fieldSym _ = Proxy
 fieldColumn :: KnownSymbol t => Field v t a -> Text
 fieldColumn f = T.pack . symbolVal $ fieldSym f
 
-type ExprBuilder = DList Action
+--type ExprBuilder = DList Action
+type ExprBuilder = Builder --DList Action
 
 -- | Adds phantom type to RawExpr
 data Expr a = Expr {-# UNPACK #-} !Int ExprBuilder
@@ -78,7 +82,7 @@ parenPrec True bld = addParens bld
 parenPrec  _    bld = bld
 
 instance ToField (Expr a) where
-  toField (Expr _ a) = Many $ D.toList a
+  toField (Expr _ a) = Plain a
 
 
 plain :: ByteString -> Action
@@ -100,15 +104,15 @@ fappend :: (Functor f, Monoid b) => f b -> b -> f b
 fappend a x = (<> x) <$> a
 
 raw :: ByteString -> ExprBuilder
-raw = D.singleton . plain
+raw = byteString
 
 rawField :: ToField a => a -> ExprBuilder
-rawField = D.singleton . toField
+rawField = escapeAction . toField
 
---binOp :: Int -> Action -> Expr a -> Expr b -> Expr c
-binOp :: IsExpr expr =>Int -> Action -> expr t1 -> expr t -> expr a
+
+binOp :: IsExpr expr => Int -> ExprBuilder -> expr a -> expr b -> expr c
 binOp p op ea eb = fromExpr . Expr p $
-   parenPrec (p < pa) a <> D.singleton op <> parenPrec (p < pb) b
+   parenPrec (p < pa) a <> op <> parenPrec (p < pb) b
   where
     (Expr pa a) = toExpr ea
     (Expr pb b) = toExpr eb
@@ -125,12 +129,12 @@ rawC c = D.singleton . Plain $ B.fromChar c
 {-# INLINE rawC #-}
 
 mkAccess :: Rel t -> ExprBuilder -> ExprBuilder
-mkAccess (RelTable r) fld =  r <> rawC '.' <> fld
-mkAccess (RelAliased r ) fld = r <> rawC '_' <> fld
+mkAccess (RelTable r) fld =  r <> char8 '.' <> fld
+mkAccess (RelAliased r ) fld = r <> char8 '_' <> fld
 
 
 commaSep :: [ExprBuilder] -> ExprBuilder
-commaSep = D.concat . intersperse (D.singleton . Plain $ B.fromChar ',')
+commaSep = mconcat . intersperse (char8 ',')
 
 data Rel r = RelTable ExprBuilder
            | RelAliased ExprBuilder
@@ -180,14 +184,14 @@ class FromRecord a b where
 instance (FromRecord (Rel a) a) => IsRecord (Rel a) where
   asRenamed (RelTable _) = do
     nm' <- newName_
-    return . RelAliased $ builder nm'
+    return . RelAliased $ nm'
 --  asRenamed (RelAliased nm) = return $ RelAliased nm
   asRenamed a = return a
   asValues rel = recordColumns $ (fromRecord rel :: RecordParser a)
 
 instance IsRecord (Expr a) where
   asValues (Expr _ a) = [a]
-  asRenamed _ = liftM term newName
+  asRenamed _ = liftM term newName_
 
 instance (FromField a) => FromRecord (Expr a) a where
   fromRecord (Expr p e) = recField $ Expr p e
@@ -324,50 +328,36 @@ class IsRecord (AggRecord a) => IsAggregate a where
 
 instance IsAggregate (ExprA a) where
   type AggRecord (ExprA a) = Expr a
-  fromAggr = toExpr
+  fromAggr = coerce
 
 instance IsAggregate (ExprA a, ExprA b) where
   type AggRecord (ExprA a, ExprA b) = (Expr a, Expr b)
-  fromAggr (a, b) = (toExpr a, toExpr b)
+  fromAggr = coerce
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c) where
   type AggRecord (ExprA a, ExprA b, ExprA c) = (Expr a, Expr b, Expr c)
-  fromAggr (a, b, c) = (toExpr a, toExpr b, toExpr c)
+  fromAggr = coerce
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d) where
   type AggRecord (ExprA a, ExprA b, ExprA c, ExprA d) = (Expr a, Expr b, Expr c, Expr d)
-  fromAggr (a, b, c, d) = (toExpr a, toExpr b, toExpr c,
-                           toExpr d)
+  fromAggr = coerce
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e) where
   type AggRecord (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e) =
        (Expr a, Expr b, Expr c, Expr d, Expr e)
-  fromAggr (a, b, c, d, e) = (toExpr a, toExpr b, toExpr c,
-                           toExpr d, toExpr e)
+  fromAggr = coerce
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f) where
   type AggRecord (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f) =
        (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f)
-  fromAggr (a, b, c, d, e, f) = (toExpr a, toExpr b, toExpr c,
-                                 toExpr d, toExpr e, toExpr f)
-
+  fromAggr = coerce
 
 instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f, ExprA g) where
   type AggRecord (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f, ExprA g) =
        (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g)
-  fromAggr (a, b, c, d, e, f, g) = (toExpr a, toExpr b, toExpr c,
-                                    toExpr d, toExpr e, toExpr f,
-                                    toExpr g)
+  fromAggr = coerce
 
 
-
-{-
-instance IsExpr ExprA where
-  toExpr (ExprGrp a) = Expr 0 a
-  toExpr (ExprAgg a) = Expr 0 a
-  fromExpr (Expr _ a) = ExprAgg a
-  {-# INLINE toExpr #-}
--}
 
 data Distinct = DistinctAll | Distinct | DistinctOn ExprBuilder
 
@@ -408,7 +398,7 @@ grabName = do
 {-# INLINE grabName #-}
 
 newExpr :: HasNameSource m => m (Expr a)
-newExpr = liftM (term . builder)  $ newName_
+newExpr = liftM term  $ newName_
 {-# INLINE newExpr #-}
 
 newName_ :: HasNameSource m => m Builder
@@ -511,7 +501,7 @@ appendWhere w = modifyWhere $ \wh ->
 
 appendWhereExpr :: IsQuery m => Expr t -> m ()
 appendWhereExpr (Expr pre w) = modifyWhere $ \wh ->
-    Just $ maybe wprep (\wh' -> (wh' `D.snoc` plain " AND ") <> wprep) wh
+    Just $ maybe wprep (\wh' -> (wh' <> byteString " AND ") <> wprep) wh
   where
     wprep = parenPrec (18 < pre) w
 
@@ -536,32 +526,32 @@ appendHaving e = Aggregator . modify $ \st ->
 
 appendGroupBy :: ExprBuilder -> Aggregator ()
 appendGroupBy e = Aggregator . modify $ \st ->
-   st { queryStateGroupBy = (queryStateGroupBy st `fappend` rawC ',') <> Just e }
+   st { queryStateGroupBy = (queryStateGroupBy st `fappend` char8 ',') <> Just e }
 
 {-# INLINE appendGroupBy #-}
 
 finishIt :: [ExprBuilder] -> QueryState t -> ExprBuilder
 finishIt expr QueryState{..} = execWriter $ do
-  forM_ queryStateWith $ \w -> tell (plain withStart `D.cons` w)
-  tell $ pure (plain "\nSELECT ")
+  forM_ queryStateWith $ \w -> tell (withStart <> w)
+  tell $ (byteString "\nSELECT ")
   tell $ distinct queryStateDistinct
   tell $ commaSep expr
-  forM_ queryStateFrom $ \f -> tell (plain "\nFROM " `D.cons` f)
-  forM_ queryStateWhere $ \w -> tell (plain "\nWHERE " `D.cons` w)
-  forM_ queryStateOrder $ \o -> tell (plain "\nORDER BY " `D.cons` o)
+  forM_ queryStateFrom $ \f -> tell (byteString "\nFROM " <> f)
+  forM_ queryStateWhere $ \w -> tell (byteString "\nWHERE " <> w)
+  forM_ queryStateOrder $ \o -> tell (byteString "\nORDER BY " <> o)
   forM_ queryStateGroupBy $ \b -> do
-     tell $ plain "\nGROUP BY " `D.cons` b
+     tell $ byteString "\nGROUP BY " <> b
   forM_ queryStateHaving $ \b -> do
-     tell $ plain "\nHAVING " `D.cons` b
+     tell $ byteString "\nHAVING " <> b
   forM_ queryStateLimit $ \l -> do
-     tell $ D.fromList [plain "\nLIMIT ", toField l]
+     tell $ byteString "\nLIMIT " <> escapeAction (toField l)
   forM_ queryStateOffset $ \o -> do
-     tell $ D.fromList [plain "\nOFFSET ", toField o]
+     tell $ byteString "\nOFFSET " <> escapeAction (toField o)
   where
     distinct d = case d of
       DistinctAll -> mempty
       Distinct -> raw "DISTINCT "
-      DistinctOn e -> (plain "DISTINCT ON (" `D.cons` e) `D.snoc` plain ") "
+      DistinctOn e -> byteString "DISTINCT ON (" <> e <>  byteString ") "
     withStart = if getAny queryStateRecursive then "\nWITH RECURSIVE "
                  else "\nWITH "
 
@@ -591,14 +581,14 @@ instance FromItem (Table (Rel r)) (Rel r) where
   fromItem (Table nm) = From $ do
     let bs = T.encodeUtf8 nm
     alias <- newName_
-    return $ FromTable bs alias (RelTable $ builder alias)
+    return $ FromTable bs alias (RelTable alias)
 
 instance (IsRecord a) => FromItem (Query a) a where
   fromItem mq = From $ do
      (r, q) <- compIt mq
-     nm <- newName
+     nm <- newName_
      renamed <- asRenamed r
-     let bld = ((plain "(" `D.cons` finishIt (asValues r) q) `D.snoc` plain ") AS ")
+     let bld = char8 '(' <> finishIt (asValues r) q <> byteString ") AS "
                <> namedRow nm renamed
      return $ FromQuery bld renamed
 
@@ -623,15 +613,15 @@ instance HasNameSource (State NameSource) where
 
 compileFrom :: FromD a -> (ExprBuilder, a)
 compileFrom (FromTable bs alias a) =
-  (D.fromList [EscapeIdentifier bs, plain " AS ", Plain alias], a)
+  (escapeIdentifier bs <> byteString " AS " <> alias, a)
 compileFrom (FromQuery bs a) = (bs, a)
 compileFrom (FromInnerJoin a b cond) = (bld, ea:.eb)
   where
     (ca, ea) = compileFrom a
     (cb, eb) = compileFrom b
-    bld = (ca `D.snoc` plain "\nINNER JOIN ") <> (cb `D.snoc` plain " ON ") <> cond
+    bld = ca <> byteString "\nINNER JOIN " <> cb <> byteString " ON " <> cond
 
-compileFrom (FromCrossJoin a b) = ((ca `D.snoc` plain ", ") <> cb, ea:.eb)
+compileFrom (FromCrossJoin a b) = (ca <> byteString ", " <> cb, ea:.eb)
   where
     (ca, ea) = compileFrom a
     (cb, eb) = compileFrom b
@@ -684,8 +674,8 @@ compileInserting table q = Update $ do
       compiledSel = finishIt exprs $ q { queryStateWith = mempty }
       res = opt (raw "\nWITH " `fprepend` withPart)
             <> raw "\nINSERT INTO " <> table <> raw "("
-            <> (commaSep (map (pure . escapeIdent) cols) `D.snoc` plain ") (")
-            <> (compiledSel `D.snoc` plain ")")
+            <> (commaSep (map escapeIdent cols) <> byteString ") (")
+            <> (compiledSel <> byteString ")")
   modify $ \st -> st { queryAction = res }
 
 finishUpdate :: (a -> RecordParser b) -> Update a -> (ExprBuilder, RowParser b)
@@ -693,7 +683,7 @@ finishUpdate recParser (Update (QueryM u)) = (result, parser)
   where
     (expr, bld) = runState u emptyQuery
     RecordParser cols parser = recParser expr
-    result = (queryAction bld `D.snoc` plain "\nRETURNING ") <> commaSep cols
+    result = queryAction bld <> byteString "\nRETURNING " <> commaSep cols
 
 compileUpdate :: (IsRecord t) => Update t -> ExprBuilder
 compileUpdate (Update (QueryM u)) =
@@ -720,7 +710,8 @@ finishUpdating table QueryState{..} =
          <> opt (raw "\nWHERE " `fprepend` queryStateWhere)
   where
     (columns, exprs) = unzip $ HashMap.toList queryAction
-    sets = raw "(" <> commaSep (map (pure . escapeIdent) columns) <> raw ")=(" <> commaSep exprs <> raw ")"
+    sets = char8 '(' <> commaSep (map escapeIdent columns)
+         <> byteString ")=(" <> commaSep exprs <> char8 ')'
 
 
 compileDeleting :: ExprBuilder -> Deleting t b -> Update b
@@ -755,19 +746,122 @@ arg (Expr _ v) f = f { functionArgs = functionArgs f ++ [v]}
 function :: Text -> Function a
 function bs = Function bs []
 
-escapeIdent :: Text -> Action
-escapeIdent = EscapeIdentifier . T.encodeUtf8
+escapeIdent :: Text -> Builder
+escapeIdent = escapeIdentifier . T.encodeUtf8
 
 call :: Function a -> Expr a
 call (Function bs args) = Expr 10 $
-   D.singleton (escapeIdent bs) <> raw "(" <> commaSep args <> raw ")"
+     escapeIdent bs <> char8 '(' <> commaSep args <> char8 ')'
 
 callAgg :: Function t -> ExprA a
 callAgg (Function bs args) = ExprA . Expr 0 $
-   (D.singleton $ escapeIdent bs) <> raw "(" <> commaSep args <> raw ")"
+   escapeIdent bs <> char8 '(' <> commaSep args <> char8 ')'
 
 data Union = UnionDistinct | UnionAll deriving (Eq, Show, Ord)
 
 data Recursive a = Recursive Union (Query a) (From a -> Query a)
 
+instance IsRecord (PGRecord ((t :-> Expr a) ': '[])) where
+  asRenamed (a :& _) = do
+    n <- newExpr
+    return $ fmap (fmap $ const n) a :& RNil
+  asValues (Identity a :& _) = [getRawExpr $ getCol a]
 
+instance (IsRecord (PGRecord (b ': c))) =>
+         IsRecord (PGRecord (t :-> Expr a ': b ': c)) where
+  asRenamed ( _ :& xs) = do
+    n <- newExpr
+    res <- asRenamed $ xs
+    return $ Proxy =: n <+> res
+  asValues (Identity a :& as) = getRawExpr (getCol a) : asValues as
+
+instance FromField a => FromRecord (PGRecord '[t :-> Expr a]) (PGRecord '[ t :-> a]) where
+  fromRecord (Identity r :& _) = (Proxy =:) <$> recField (getCol r)
+
+instance (FromRecord (PGRecord (b ': c)) (PGRecord (b' ': c')), FromField a) =>
+   FromRecord (PGRecord (t :-> Expr a ': (b ': c)))
+   (PGRecord ( t :-> a ': (b' ': c'))) where
+  fromRecord (Identity a :& as) = (\a' b' -> Proxy =: a' <+> b') <$> recField (getCol a)
+                                                                 <*> fromRecord as
+
+class RecExpr a where
+  mkRecExpr :: ExprBuilder -> a -> a
+
+instance NamesColumn t => RecExpr (PGRecord '[t :-> Expr a ]) where
+  mkRecExpr b _ = Proxy =: (Expr 0 nm)
+    where nm = b <> escapeAction (toField $ columnName (Proxy :: Proxy t))
+
+instance (NamesColumn t, RecExpr (PGRecord (x ': xs)))
+         => RecExpr (PGRecord (t :-> Expr a ': x ': xs )) where
+  mkRecExpr b _ = Proxy =: (Expr 0 nm)
+                `rappend` mkRecExpr b (undefined :: PGRecord ( x ': xs))
+    where nm = b <> escapeAction (toField $ columnName (Proxy :: Proxy t))
+
+instance forall a r. (RecExpr (PGRecord a), r~(PGRecord a)) =>
+         FromItem (Table (PGRecord a)) (PGRecord a) where
+  fromItem (Table nm) = From $ do
+    let bs = T.encodeUtf8 nm
+        nameBld = escapeIdentifier bs
+    alias <- byteString <$> grabName --Alias bs nameBld
+    let r = mkRecExpr (alias <> char8 '.') (undefined :: PGRecord a)
+        q = nameBld <> byteString " AS " <> alias
+    return $ FromQuery q r
+
+
+
+rupdate :: forall a b . RecExpr a => Table a -> (a -> Updating a b) -> Update b
+rupdate (Table nm) f = Update $ do
+  alias <- B.fromByteString <$> grabName
+  let r = mkRecExpr (alias <> char8 '.') (undefined :: a)
+      q = nameBld <> byteString " AS " <> alias
+      upd = f r
+  compileUpdating q upd
+  where
+      nameBld = escapeIdentifier $ T.encodeUtf8 nm
+
+rdelete :: forall a  b . RecExpr a => Table a -> (a -> Deleting a b) -> Update b
+rdelete (Table nm) f = do
+  alias <- B.fromByteString <$> grabName
+  let r = mkRecExpr (alias <> char8 '.') (undefined :: a)
+      q = nameBld <> byteString " AS " <> alias
+      upd = f r
+  compileDeleting q upd
+  where
+     nameBld = escapeIdentifier $ T.encodeUtf8 nm
+
+
+rinsert :: forall a . RecExpr a => Table a -> Query (UpdExpr a) -> Update a
+rinsert (Table nm) mq = do
+  let r = mkRecExpr mempty (undefined :: a)
+  (UpdExpr upd, q) <- compIt mq
+  compileInserting (escapeIdent nm) $ q {queryAction = HashMap.toList upd}
+  return r
+
+
+
+escapeByteA :: ByteString -> Builder
+escapeByteA bs = "'\\x" <> byteStringHex bs <> char8 '\''
+
+escapeString :: ByteString -> Builder
+escapeString bs = char8 '\'' <> go bs <> char8 '\''
+  where
+    go i = let (h,t) = B.break (== '\'') i
+           in byteString h <> case B.uncons t of
+                                   Nothing -> mempty
+                                   Just (_, b') -> "''" <> go b'
+
+escapeIdentifier :: ByteString -> Builder
+escapeIdentifier bs = char8 '\"' <> go bs <> char8 '\"'
+  where
+    go i = let (h,t) = B.break (== '\"') i
+           in byteString h <> case B.uncons t of
+                                   Nothing -> mempty
+                                   Just (_, b') -> "\"\"" <> go b'
+
+
+escapeAction :: Action -> Builder
+escapeAction (Plain a ) = a
+escapeAction (Escape t) = escapeString t
+escapeAction (EscapeByteA t) = escapeByteA t
+escapeAction (EscapeIdentifier t) = escapeIdentifier t
+escapeAction (Many xs) = mconcat (map escapeAction xs)
