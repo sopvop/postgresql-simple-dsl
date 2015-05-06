@@ -56,3 +56,4 @@ array_cat (Expr _ a) (Expr _ b) = Expr 0 $
 
 array_empty :: (Expr (PGArray a))
 array_empty = term $ byteString "ARRAY[]"
+

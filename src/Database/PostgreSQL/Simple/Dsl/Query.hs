@@ -13,7 +13,6 @@ module Database.PostgreSQL.Simple.Dsl.Query
      -- * Defining Records
       takeField
      , recField
-     , Field
      , RecordParser
      , recordRowParser
      , IsExpr
@@ -55,18 +54,14 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , distinct
      , distinctOn
      -- * Updates
+     , insert
      , Update
+     , update
+     , setFields
      , UpdExpr
      , Updating
-     , update
-     , insert
-     , Deleting
      , delete
-     , set
-     , (=.)
-     , (=.!)
-     , setField
-     , setFields
+     , Deleting
      , returning
      -- * Executing updates
      , queryUpdate
@@ -74,7 +69,6 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , executeUpdate
      , formatUpdate
      -- * Expressions
-     , Rel, (~>), (?>)
      , Expr
      , val
      , (==.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
@@ -111,10 +105,10 @@ import           Control.Monad.State.Class
 import           Control.Monad.Trans.State               (runState)
 import           Data.Foldable                           (foldlM, toList)
 
-import           Blaze.ByteString.Builder                as B
 import           Data.ByteString                         (ByteString)
-import           Data.ByteString.Builder                 (byteString, char8)
-import qualified Data.DList                              as D
+import           Data.ByteString.Builder                 (byteString, char8,
+                                                          toLazyByteString)
+import           Data.ByteString.Lazy                    (toStrict)
 import qualified Data.HashMap.Strict                     as HashMap
 import           Data.Int                                (Int64)
 import           Data.Maybe
@@ -122,9 +116,11 @@ import           Data.Monoid
 import           Data.Text                               (Text)
 import qualified Data.Text.Encoding                      as T
 import qualified Database.PostgreSQL.LibPQ               as PQ
-import           Database.PostgreSQL.Simple              ((:.) (..), Connection, Only (..))
+import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
+                                                          Only (..))
 
 import qualified Database.PostgreSQL.Simple              as PG
+import           Database.PostgreSQL.Simple.Dsl.Escaping
 import           Database.PostgreSQL.Simple.Dsl.Internal
 import qualified Database.PostgreSQL.Simple.Internal     as PG
 import           Database.PostgreSQL.Simple.ToField
@@ -248,11 +244,11 @@ table = Table
 compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (FromD a)
 compileValues vals renamed = do
   nm <- newName_
-  let res = byteString "(VALUES " <> body <> byteString ") AS " <> namedRow nm renamed
+  let res = "(VALUES " <> body <> ") AS " <> namedRow nm renamed
   return $ FromQuery res renamed
   where
     body = commaSep $ map packRow vals
-    packRow r = raw "(" <> commaSep (asValues r) <> raw ")"
+    packRow r = char8 '(' <> commaSep (asValues r) <> char8 ')'
 
 values :: forall a . (IsRecord a) => [a] -> From a
 values inp = From $ do
@@ -279,7 +275,7 @@ select mq = From $ do
   (r, q) <- compIt mq
   nm <- newName_
   renamed <- asRenamed r
-  let bld = char8 '(' <> finishIt (asValues r) q <> byteString ") AS "
+  let bld = char8 '(' <> finishIt (asValues r) q <> ") AS "
             <> namedRow nm renamed
   return $ FromQuery bld renamed
 
@@ -295,7 +291,7 @@ with mq act = do
   renamed <- asRenamed e
   nm <- newName_
   let bld = namedRow nm renamed
-            <> byteString " AS ( " <> finishIt (asValues e) q <> char8 ')'
+            <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
   appendWith bld
   act $ From . return $ FromQuery nm renamed
 
@@ -304,9 +300,9 @@ withUpdate (Update mq) act = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
   nm <- newName_
-  let returning = asValues e
-      body = queryAction q <> byteString "\nRETURNING " <> commaSep returning
-      bld = namedRow nm renamed <> byteString " AS ( "  <> body <> char8 ')'
+  let returnings = asValues e
+      body = queryAction q <> "\nRETURNING " <> commaSep returnings
+      bld = namedRow nm renamed <> " AS ( "  <> body <> char8 ')'
   appendWith bld
   act $ From . return $ FromQuery nm renamed
 
@@ -340,24 +336,24 @@ exists :: (IsQuery m) => Query (Expr a) -> m (Expr Bool)
 exists mq = do
     (r, q') <- compIt mq
     let body = finishIt (asValues r) q'
-    return . term $ byteString " EXISTS (" <> body <> char8 ')'
+    return . term $ " EXISTS (" <> body <> char8 ')'
 
 -- | append to ORDER BY clase
 orderBy :: Sorting -> Query ()
 orderBy f | sortingEmpty f = return ()
-          | otherwise = modify $ \st -> let or = queryStateOrder st
-                                        in st { queryStateOrder = go or }
+          | otherwise = modify $ \st -> let or' = queryStateOrder st
+                                        in st { queryStateOrder = go or' }
    where go Nothing = Just sort
          go (Just o) = Just $ o <> char8 ',' <> sort
          sort = compileSorting f
 
 -- | ascend on expression
 ascendOn :: (Expr a) -> Sorting
-ascendOn (Expr _ a) = Sorting [a <> raw " ASC"]
+ascendOn (Expr _ a) = Sorting [a <> " ASC"]
 
 -- | descend on expression
 descendOn :: Expr t -> Sorting
-descendOn (Expr _ a) = Sorting [a <> raw " DESC"]
+descendOn (Expr _ a) = Sorting [a <> " DESC"]
 
 -- | set LIMIT
 limitTo :: Int -> Query ()
@@ -404,108 +400,62 @@ a ==. b = binOp 15 (char8 '=') a b
 a >. b = binOp 15 (char8 '>') a b
 
 (>=.) :: IsExpr expr => expr a -> expr a -> expr Bool
-a >=. b = binOp 15 (byteString ">=") a b
+a >=. b = binOp 15 ">=" a b
 
 (<.) :: IsExpr expr => expr a -> expr a -> expr Bool
 a <. b = binOp 15 (char8 '<') a b
 
 (<=.) :: IsExpr expr => expr a -> expr a -> expr Bool
-a <=. b = binOp 15 (byteString "<=") a b
+a <=. b = binOp 15 "<=" a b
 
 infixr 3 &&.
 (&&.), (||.) :: IsExpr expr => expr Bool -> expr Bool -> expr Bool
-a &&. b = binOp 18 (byteString " AND ") a b
+a &&. b = binOp 18 " AND " a b
 
 infixr 2 ||.
-a ||. b = binOp 19 (byteString " OR ") a b
+a ||. b = binOp 19 " OR " a b
 
 -- | Access field of relation
 not_ :: IsExpr expr => expr Bool -> expr Bool
-not_ r = prefOp 17 (byteString " NOT ") r
-
-mkAcc :: (IsExpr expr, KnownSymbol t1) => Rel t -> Field v t1 a1 -> expr a
-mkAcc rel fld = fromExpr . Expr 2 $ mkAccess rel (raw . T.encodeUtf8 $ fieldColumn fld)
-
-infixl 9 ~>, ?>
-(~>) :: (KnownSymbol t) => Rel a -> Field a t b -> Expr b
-(~>) = mkAcc
-
-(?>) :: (KnownSymbol t, IsExpr expr) => Rel (Maybe a) -> Field a t b -> expr (Maybe b)
-(?>) = mkAcc
+not_ r = prefOp 17 " NOT " r
 
 -- | like operator
 (~.) :: Expr Text -> Expr Text -> Expr Bool
-(~.) a b = binOp 14 (byteString " ~ ") a b
+(~.) a b = binOp 14 " ~ " a b
 
 isInList :: (IsExpr expr, ToField a) => expr a -> [a] -> expr Bool
 isInList _ [] = false
-isInList a l = binOp 11 (byteString " IN ") a (fromExpr $ term (lst))
+isInList a l = binOp 11 " IN " a (fromExpr $ term (lst))
   where
     lst = escapeAction $ toField $ PG.In l
 
 true :: IsExpr expr => expr Bool
-true = fromExpr . term $ byteString "true"
+true = fromExpr $ term "true"
 {-# INLINE true #-}
 
 false :: IsExpr expr => expr Bool
-false = fromExpr . term $ byteString "false"
+false = fromExpr $ term "false"
 {-# INLINE false #-}
 
 just :: Expr a -> Expr (Maybe a)
 just (Expr p r) = Expr p r
 
 isNull :: Expr a -> Expr Bool
-isNull r = binOp 7 (byteString " IS ") r (term $ byteString "NULL")
+isNull r = binOp 7 " IS " r (term "NULL")
 
 unsafeCast :: Expr a -> Expr b
 unsafeCast (Expr p r) = Expr p r
 
 cast :: IsExpr expr => ByteString -> expr a -> expr b
-cast t eb = fromExpr $ Expr 1 $ parenPrec (1 < p) b <> raw "::" <> raw t
+cast t eb = fromExpr $ Expr 1 $ parenPrec (1 < p) b <> "::" <> byteString t
   where
     (Expr p b) = toExpr eb
 {-# INLINE cast #-}
-
-infixr 7 =., =.!
-(=.) :: forall v t a. (KnownSymbol t) => Field v t a -> Expr a -> UpdExpr v
-f =. (Expr _ a) = UpdExpr $ HashMap.singleton (fieldColumn f) a
-
-(=.!) :: (KnownSymbol t, ToField a) => Field v t a -> a -> UpdExpr v
-(=.!) f e = f =. val e
-
-set :: KnownSymbol t => Field v t a -> Expr a -> UpdExpr v
-set f a = f =. a
-
-setField :: (KnownSymbol t) => Field v t a -> Expr a -> Updating v ()
-setField f a = setFields (f =. a)
 
 setFields :: UpdExpr t -> Updating t ()
 setFields (UpdExpr x) = Updating $ do
   st <- get
   put st { queryAction = queryAction st <> x }
-
-update :: Table (Rel a) -> (Rel a -> Updating a b) -> Update b
-update (Table nm) f = Update $ do
-  alias <- newName_
-  let rel = RelTable alias
-  compileUpdating ( escapeIdent nm <> byteString " AS " <> alias) $ f rel
-
-insert :: Table (Rel a) -> Query (UpdExpr a) -> Update (Rel a)
-insert (Table nm) mq = do
-  let rel = RelTable $ escapeIdent nm
-  (UpdExpr upd, q) <- compIt mq
-  compileInserting (escapeIdent nm) $ q {queryAction = HashMap.toList upd}
-  return rel
-
--- | Delete row from given table
--- > delete (from users) $ \u -> where & u~>UserKey ==. val uid
--- turns into
--- > DELETE FROM users WHERE id ==. 42
-delete :: Table (Rel a) -> (Rel a -> Deleting a b) -> Update b
-delete (Table nm) f = do
-  alias <- newName_
-  let rel = RelTable alias
-  compileDeleting (escapeIdent nm <> byteString " AS " <> alias) $ f rel
 
 -- | Same as above but table is taken from table class
 -- > deleteFromTable $ \u -> where & u~>UserKey ==. val uid
@@ -543,15 +493,15 @@ compileUnion un q f = do
    let frm = From . return $ FromQuery nm renamed
    (exprRec, queryRec) <- compIt $ f frm
    let bld = namedRow nm renamed
-           <> byteString " AS (" <> finishIt (asValues exprNonRec) queryNonRec
+           <> " AS (" <> finishIt (asValues exprNonRec) queryNonRec
            <> unioner <> finishIt (asValues exprRec) queryRec <> char8 ')'
    modifyRecursive $ const True
    appendWith bld
    return frm
    where
      unioner = case un of
-         UnionDistinct -> byteString " UNION "
-         UnionAll      -> byteString " UNION ALL "
+         UnionDistinct -> " UNION "
+         UnionAll      -> " UNION ALL "
 {-# INLINE compileUnion #-}
 {-
 aggregate :: (IsRecord a, IsAggregate b) => (a -> b) -> Query a -> Query (AggRecord b)
@@ -601,7 +551,7 @@ escapeIdentifier conn s =
     PQ.escapeIdentifier c s >>= checkError c
 
 buildQuery :: Connection -> ExprBuilder -> IO ByteString
-buildQuery conn q = pure $ B.toByteString q {-<$> foldlM sub mempty (D.toList q)
+buildQuery conn q = pure . toStrict $ toLazyByteString q {-<$> foldlM sub mempty (D.toList q)
   where
     sub !acc (Plain b)       = pure $ acc <> b
     sub !acc (Escape s)      = (mappend acc . quote) <$> escapeStringConn conn s
@@ -643,13 +593,13 @@ with' mq act = do
   renamed <- asRenamed e
   nm <- newName_
   let bld = namedRow nm renamed
-            <> byteString " AS ( " <> finishIt (asValues e) q <> char8 ')'
+            <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
   appendWith bld
   act $ From . return $ FromQuery nm renamed
 
 
 exists' :: IsRecord a => Query a -> Expr a
-exists' mq = term $ byteString " EXISTS (" <> body <> char8 ')'
+exists' mq = term $ " EXISTS (" <> body <> char8 ')'
   where
     body = compileQuery mq
 

@@ -13,34 +13,34 @@ import           Database.PostgreSQL.Simple.Types        (PGArray (..))
 data QueryInt
 
 intset :: Expr Int -> Expr (PGArray Int)
-intset (Expr _ a) = Expr 0 $ raw "intset(" <> a <> char8 ')'
+intset (Expr _ a) = Expr 0 $ "intset(" <> a <> char8 ')'
 
 icount :: Expr (PGArray Int) -> Expr Int
-icount (Expr _ a) = Expr 0 $ raw "icount(" <> a <> char8 ')'
+icount (Expr _ a) = Expr 0 $ "icount(" <> a <> char8 ')'
 
 sort_asc :: Expr (PGArray Int) -> Expr (PGArray Int)
-sort_asc (Expr _ a) = Expr 0 $ raw "sort_asc(" <> a <> char8 ')'
+sort_asc (Expr _ a) = Expr 0 $ "sort_asc(" <> a <> char8 ')'
 
 sort_desc :: Expr (PGArray Int) -> Expr (PGArray Int)
-sort_desc (Expr _ a) = Expr 0 $ raw "sort_desc(" <> a <> char8 ')'
+sort_desc (Expr _ a) = Expr 0 $ "sort_desc(" <> a <> char8 ')'
 
 -- | idx(int[], i)
 idx :: Expr (PGArray Int) -> Expr Int -> Expr Int
-idx (Expr _ a) (Expr _ i) = Expr 0 $ raw "idx(" <> a <> char8 ',' <> i <> char8 ')'
+idx (Expr _ a) (Expr _ i) = Expr 0 $ "idx(" <> a <> char8 ',' <> i <> char8 ')'
 
 -- | subarray(int[], start, len)
 subarray :: Expr (PGArray Int) -> Expr Int -> Expr Int -> Expr (PGArray Int)
 subarray (Expr _ a) (Expr _ start) (Expr _ len)  =
-      Expr 0 $ raw "subarray(" <> a <> char8 ',' <> start <> char8 ',' <> len <> char8 ')'
+      Expr 0 $ "subarray(" <> a <> char8 ',' <> start <> char8 ',' <> len <> char8 ')'
 
 -- | subarray(int[], start)
 subarray1 :: Expr (PGArray Int) -> Expr Int -> Expr (PGArray Int)
 subarray1 (Expr _ a) (Expr _ start) =
-      Expr 0 $ raw "subarray(" <> a <> char8 ',' <> start <> char8 ')'
+      Expr 0 $ "subarray(" <> a <> char8 ',' <> start <> char8 ')'
 
 -- | uniq(int[])
 uniq :: Expr (PGArray Int) -> Expr (PGArray Int)
-uniq (Expr _ a) = Expr 0 $ raw "uniq(" <> a <> char8 ')'
+uniq (Expr _ a) = Expr 0 $ "uniq(" <> a <> char8 ')'
 
 -- | operator &&
 overlap :: Expr (PGArray Int) -> Expr (PGArray Int) -> Expr Bool

@@ -17,16 +17,15 @@ module Database.PostgreSQL.Simple.Dsl.Record
    Rec(..)
   , (=:)
   , (<+>)
-  , setR
   , (.>)
+  , (=.)
+  , (=.!)
   , Updater
   , UpdaterM
   , mkUpdate
-  , setU
-  , setVal
-  , rupdate
-  , rinsert
-  , rdelete
+  , setR
+  , setField
+  , setFieldVal
   , (:::)
   , IElem
   , SField(..)
@@ -36,18 +35,14 @@ module Database.PostgreSQL.Simple.Dsl.Record
 
 import           GHC.TypeLits
 
-import           Blaze.ByteString.Builder.ByteString     as B
-import           Blaze.ByteString.Builder.Char8          as B
 import           Control.Monad.Identity
 import           Control.Monad.Trans.State.Strict        (State, execState, modify)
 import qualified Data.HashMap.Strict                     as HashMap
-import           Data.Monoid
 import           Data.Proxy
 import qualified Data.Text                               as T
-import qualified Data.Text.Encoding                      as T
 import           Data.Vinyl.Core
 import           Data.Vinyl.Lens
-import           Data.Vinyl.Notation
+
 import           Data.Vinyl.TypeLevel                    (RIndex)
 
 import           Database.PostgreSQL.Simple.Dsl.Internal
@@ -90,15 +85,23 @@ mkUpdate (UpdaterM u) = UpdExpr (execState u mempty)
 fieldName :: forall t a proxy. KnownSymbol t => proxy (t :-> a) -> T.Text
 fieldName _ = T.pack $ symbolVal (Proxy :: Proxy t)
 
-setU :: (KnownSymbol t, IElem (t :-> Expr a) s) =>
+setField :: (KnownSymbol t, IElem (t :-> Expr a) s) =>
          proxy (t :-> Expr a) -> Expr a -> Updater (PGRecord s)
-setU fld (Expr _ a) = UpdaterM . modify $ HashMap.insert (fieldName fld) a
+setField fld (Expr _ a) = UpdaterM . modify $ HashMap.insert (fieldName fld) a
 
-setVal :: (KnownSymbol t,  ToField a, IElem (t :-> Expr a) s) =>
+setFieldVal :: (KnownSymbol t,  ToField a, IElem (t :-> Expr a) s) =>
           proxy (t :-> Expr a) -> a -> Updater (PGRecord s)
-setVal f v = setU f (term $ rawField v)
+setFieldVal f v = setField f (term $ rawField v)
+
+infixr 7 =., =.!
+(=.) :: (KnownSymbol t, IElem (t :-> Expr a) s) =>
+         proxy (t :-> Expr a) -> Expr a -> Updater (PGRecord s)
+(=.) = setField
+
+(=.!) :: (KnownSymbol t,  ToField a, IElem (t :-> Expr a) s) =>
+          proxy (t :-> Expr a) -> a -> Updater (PGRecord s)
+(=.!) = setFieldVal
 
 setR :: (KnownSymbol t, IElem (t :-> Expr a) s) =>
      proxy (t :-> Expr a) -> Expr a -> UpdExpr (PGRecord s)
 setR fld (Expr _ a) = UpdExpr $ HashMap.singleton (fieldName fld) a
-

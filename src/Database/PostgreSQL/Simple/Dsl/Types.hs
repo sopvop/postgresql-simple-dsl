@@ -17,9 +17,9 @@ module Database.PostgreSQL.Simple.Dsl.Types
 import           Control.Monad.Identity
 import           Data.Proxy
 import qualified Data.Text                        as T
-import           Data.Vinyl.Core                  (Rec (..), rappend, (<+>))
+import           Data.Vinyl.Core                  (Rec (..))
 
-import           GHC.TypeLits                     (KnownSymbol, Symbol, symbolVal)
+import           GHC.TypeLits                     (KnownSymbol, symbolVal)
 
 import           Database.PostgreSQL.Simple.Types (QualifiedIdentifier (..))
 
