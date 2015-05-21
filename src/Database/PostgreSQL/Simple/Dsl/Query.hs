@@ -55,6 +55,9 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , distinctOn
      -- * Updates
      , insert
+     , insert'
+     , insertFields
+     , Inserting
      , Update
      , update
      , setFields
@@ -71,7 +74,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      -- * Expressions
      , Expr
      , val
-     , (==.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
+     , (==.), (/=.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
      , true, false, just, isNull, isInList
      , not_
      , exists
@@ -370,7 +373,7 @@ distinctOn (Expr _ e) = modifyDistinct . const $ DistinctOn e
 
 -- | Execute query and get results
 queryWith :: Connection -> (a -> RecordParser r) -> Query a -> IO [r]
-queryWith c fromRec q = buildQuery c body >>= PG.queryWith_ parser c . PG.Query
+queryWith c fromRec q = PG.queryWith_ parser c ( PG.Query $ buildQuery body)
   where
     (body, parser) = finishQuery fromRec q
 
@@ -379,22 +382,24 @@ query c q = queryWith c fromRecord q
 
 -- | Execute discarding results, returns number of rows modified
 execute :: Connection -> Query r -> IO Int64
-execute c q = PG.execute_ c . PG.Query =<< buildQuery c (finishQueryNoRet q)
+execute c q = PG.execute_ c . PG.Query $ buildQuery (finishQueryNoRet q)
 
 -- | Format query for previewing
-formatQuery :: IsRecord a => Connection -> Query a -> IO ByteString
-formatQuery c q = buildQuery c $ compileQuery q
+formatQuery :: IsRecord a => Query a -> ByteString
+formatQuery q = buildQuery $ compileQuery q
 
 
 -- | lift value to Expr
 val :: (ToField a ) => a -> Expr a
 val = term . rawField
 
-infix 4 ==., <., <=., >., >=.
+infix 4 ==., /=., <., <=., >., >=.
 
 (==.) :: IsExpr expr => expr a -> expr a -> expr Bool
 a ==. b = binOp 15 (char8 '=') a b
 
+(/=.) :: IsExpr expr => expr a -> expr a -> expr Bool
+a /=. b = binOp 15 "!=" a b
 
 (>.) :: IsExpr expr => expr a -> expr a -> expr Bool
 a >. b = binOp 15 (char8 '>') a b
@@ -457,11 +462,17 @@ setFields (UpdExpr x) = Updating $ do
   st <- get
   put st { queryAction = queryAction st <> x }
 
+insertFields :: UpdExpr t -> Inserting t ()
+insertFields (UpdExpr x) = Inserting $ do
+  st <- get
+  put st { queryAction = queryAction st <> x }
+
+
 -- | Same as above but table is taken from table class
 -- > deleteFromTable $ \u -> where & u~>UserKey ==. val uid
 queryUpdateWith :: Connection -> (a -> RecordParser b) -> Update a -> IO [b]
 queryUpdateWith con fromRec u = do
-    q <- buildQuery con body
+    let q = buildQuery body
     PG.queryWith_ parser con (PG.Query q)
   where
     (body, parser) = finishUpdate fromRec u
@@ -470,11 +481,11 @@ queryUpdate :: FromRecord a b => Connection -> Update a -> IO [b]
 queryUpdate con u = queryUpdateWith con fromRecord u
 {-# INLINE queryUpdate #-}
 
-formatUpdate :: IsRecord t => Connection -> Update t -> IO ByteString
-formatUpdate con u = buildQuery con (compileUpdate u)
+formatUpdate :: IsRecord t => Update t -> ByteString
+formatUpdate u = buildQuery (compileUpdate u)
 
 executeUpdate :: Connection -> Update a -> IO Int64
-executeUpdate con u = PG.execute_ con . PG.Query =<< buildQuery con (finishUpdateNoRet u)
+executeUpdate con u = PG.execute_ con $ PG.Query ( buildQuery (finishUpdateNoRet u))
 
 withRecursive :: (IsRecord a) =>  Recursive a -> (From a -> Query b) -> Query b
 withRecursive (Recursive un q f) ff = compileUnion un q f >>= ff
@@ -550,16 +561,9 @@ escapeIdentifier conn s =
     PG.withConnection conn $ \c ->
     PQ.escapeIdentifier c s >>= checkError c
 
-buildQuery :: Connection -> ExprBuilder -> IO ByteString
-buildQuery conn q = pure . toStrict $ toLazyByteString q {-<$> foldlM sub mempty (D.toList q)
-  where
-    sub !acc (Plain b)       = pure $ acc <> b
-    sub !acc (Escape s)      = (mappend acc . quote) <$> escapeStringConn conn s
-    sub !acc (EscapeByteA s) = (mappend acc . quote) <$> escapeByteaConn conn s
-    sub !acc (EscapeIdentifier s) = (mappend acc . B.fromByteString) <$> escapeIdentifier conn s
-    sub !acc (Many xs)       = foldlM sub acc xs
-    quote = inQuotes . B.fromByteString
--}
+buildQuery :: ExprBuilder -> ByteString
+buildQuery = toStrict . toLazyByteString
+
 cross :: (IsRecord a, IsRecord b) => From a -> From b -> From (a:.b)
 cross = crossJoin
 

@@ -3,6 +3,7 @@ module Database.PostgreSQL.Simple.Dsl.Functions
        ( count
        , countAll
        , sum_
+       , max_
        , coalesce
        , coalesce'
        , array_agg
@@ -26,8 +27,11 @@ count (Expr _ a) = ExprA . Expr 0 $ byteString "count(" <> a <> char8 ')'
 countAll :: ExprA Int64
 countAll = ExprA $ Expr 0 (byteString "count(*)")
 
-sum_ :: Num a => Expr a -> ExprA Int64
+sum_ :: Expr a -> ExprA a
 sum_ (Expr _ a) = ExprA $ Expr 0 (byteString "sum(" <> a <> char8 ')')
+
+max_ :: Expr a -> ExprA a
+max_ (Expr _ a) = ExprA $ Expr 0 (byteString "max(" <> a <> char8 ')')
 
 array_agg :: (Expr a) -> ExprA (Maybe (PGArray a))
 array_agg (Expr _ a) = ExprA . Expr 0 $ byteString "array_agg(" <> a <> byteString ")"

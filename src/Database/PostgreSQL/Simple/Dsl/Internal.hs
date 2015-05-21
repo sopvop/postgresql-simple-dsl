@@ -596,8 +596,8 @@ newtype Update a = Update { runUpdate :: QueryM (ExprBuilder) a }
    deriving (Functor, Applicative, Monad, HasNameSource)
 
 
-newtype Inserting r a = Inserting { runInserting :: QueryM [(Text, ExprBuilder)] a }
-   deriving (Functor, Applicative, Monad, HasNameSource)
+newtype Inserting r a = Inserting { runInserting :: QueryM (HashMap Text ExprBuilder) a }
+   deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
 compileInserting :: ExprBuilder -> QueryState [(Text, ExprBuilder)] -> Update ()
@@ -610,6 +610,24 @@ compileInserting table q = Update $ do
             <> (commaSep (map escapeIdent cols) <> ") (")
             <> (compiledSel <> ")")
   modify $ \st -> st { queryAction = res }
+
+finishInserting :: ExprBuilder -> QueryState (HashMap Text ExprBuilder) -> ExprBuilder
+finishInserting table q@QueryState{..} =
+    opt ("\nWITH " `fprepend` queryStateWith)
+      <> "\nINSERT INTO " <> table <> char8 '('
+      <> (commaSep (map escapeIdent columns) <> ") (")
+      <> (compiledSel <> ")")
+  where
+    compiledSel = finishIt exprs $ q { queryStateWith = mempty }
+    (columns, exprs) = unzip $ HashMap.toList queryAction
+
+compileInserting' :: ExprBuilder -> Inserting t a -> QueryM ExprBuilder a
+compileInserting' table (Inserting a) = do
+  (r, q) <- compIt a
+  let res = finishInserting table q
+  modify $ \st -> st { queryAction = res }
+  return r
+
 
 finishUpdate :: (a -> RecordParser b) -> Update a -> (ExprBuilder, RowParser b)
 finishUpdate recParser (Update (QueryM u)) = (result, parser)
@@ -658,7 +676,6 @@ compileDeleting table (Deleting del) = Update $ do
    return r
 
 
---compileUpdating :: (MonadState NameSource m) => Action -> Updating t r -> m (r, ExprBuilder)
 compileUpdating :: ExprBuilder -> Updating t a -> QueryM ExprBuilder a
 compileUpdating table (Updating a) = do
   (r, q) <- compIt a
@@ -769,4 +786,10 @@ insert (Table nm) mq = do
   compileInserting (escapeIdent nm) $ q {queryAction = HashMap.toList upd}
   return r
 
-
+insert' :: forall a b . RecExpr a => Table a -> Inserting a b -> Update a
+insert' (Table nm) upd = Update $ do
+  let r = mkRecExpr mempty (undefined :: a)
+  _ <- compileInserting' nameBld upd
+  return r
+  where
+      nameBld = escapeIdentifier $ T.encodeUtf8 nm
