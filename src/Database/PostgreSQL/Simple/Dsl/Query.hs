@@ -36,6 +36,13 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , fromPureValues
      , innerJoin
      , crossJoin
+     , Nullable
+     , justNullable
+     , fromNullable
+     , nullableParser
+     , leftJoin
+     , rightJoin
+     , fullJoin
      -- * With
      , with
      , withUpdate
@@ -98,8 +105,8 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , groupBy
      , from'
      , with'
-     , cross
-     , inner
+--     , cross
+--     , inner
 --     , on
      ) where
 import           Control.Applicative
@@ -244,11 +251,11 @@ table :: Text -> Table a
 table = Table
 {-# INLINE table #-}
 
-compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (FromD a)
+compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (ExprBuilder, a)
 compileValues vals renamed = do
   nm <- newName_
   let res = "(VALUES " <> body <> ") AS " <> namedRow nm renamed
-  return $ FromQuery res renamed
+  return $ (res, renamed)
   where
     body = commaSep $ map packRow vals
     packRow r = char8 '(' <> commaSep (asValues r) <> char8 ')'
@@ -280,7 +287,7 @@ select mq = From $ do
   renamed <- asRenamed r
   let bld = char8 '(' <> finishIt (asValues r) q <> ") AS "
             <> namedRow nm renamed
-  return $ FromQuery bld renamed
+  return $ (bld, renamed)
 
 selectExpr :: Query (Expr a) -> Query (Expr a)
 selectExpr mq = do
@@ -296,7 +303,7 @@ with mq act = do
   let bld = namedRow nm renamed
             <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
   appendWith bld
-  act $ From . return $ FromQuery nm renamed
+  act $ From . return $ (nm, renamed)
 
 withUpdate :: (IsRecord b, IsQuery m) => Update b -> (From b -> m c) -> m c
 withUpdate (Update mq) act = do
@@ -307,13 +314,13 @@ withUpdate (Update mq) act = do
       body = queryAction q <> "\nRETURNING " <> commaSep returnings
       bld = namedRow nm renamed <> " AS ( "  <> body <> char8 ')'
   appendWith bld
-  act $ From . return $ FromQuery nm renamed
+  act $ From . return $ (nm, renamed)
 
 from :: (IsQuery m, FromItem f a) => f -> m a
 from fr = do
   ns <- getNameSource
   let (frm, ns') = runState (runFrom $ fromItem fr) ns
-      (cmp, expr) = compileFrom frm
+      (cmp, expr) = frm
   appendFrom cmp
   modifyNameSource (const ns')
   return expr
@@ -321,19 +328,51 @@ from fr = do
 {-# INLINE from #-}
 
 -- | Inner join
-innerJoin :: forall a b .(IsRecord a, IsRecord b) =>
-   From a -> From b -> (a -> b -> Expr Bool) -> From (a:.b)
-innerJoin (From mfa) (From mfb) f = From $ do
-    fa <- mfa
-    fb <- mfb
-    let Expr _ onexpr = f (fromToExpr fa) (fromToExpr fb)
-    return $ FromInnerJoin fa fb onexpr
+innerJoin :: (FromItem fa a, FromItem fb b) =>
+     fa -> fb -> (a -> b -> Expr Bool) -> From (a :. b)
+innerJoin fa fb f = From $ do
+    (ba, ea) <- runFrom (fromItem fa)
+    (bb, eb) <- runFrom (fromItem fb)
+    let Expr _ onexpr = f ea eb
+        bres = (addParens ba) <> "INNER JOIN" <> addParens bb <> " ON " <> onexpr
+    return (bres, ea :. eb)
 
--- | Cross join
-crossJoin :: (FromItem a a', FromItem b b') => a -> b -> From (a' :. b')
-crossJoin fa fb = From $ FromCrossJoin <$> runFrom (fromItem fa)
-                                       <*> runFrom (fromItem fb)
-{-# INLINE crossJoin #-}
+crossJoin :: From a -> From b -> From (a :. b)
+crossJoin (From mfa) (From mfb) = From $ do
+    (ba, ea) <- mfa
+    (bb, eb) <- mfb
+    let bres = (addParens ba) <> "CROSS JOIN" <> addParens bb
+    return (bres, ea :. eb)
+
+leftJoin :: (FromItem fa a, FromItem fb b)
+         => fa -> fb -> (a -> b -> Expr Bool)
+         -> From (a :. Nullable b)
+leftJoin fa fb f = From $ do
+    (ba, ea) <- runFrom (fromItem fa)
+    (bb, eb) <- runFrom (fromItem fb)
+    let Expr _ onexpr = f ea eb
+        bres = (addParens ba) <> "LEFT JOIN" <> addParens bb <> " ON " <> onexpr
+    return (bres, ea :. Nullable eb)
+
+rightJoin :: (FromItem fa a, FromItem fb b)
+         => fa -> fb -> (a -> b -> Expr Bool)
+         -> From (Nullable a :. b)
+rightJoin fa fb f = From $ do
+    (ba, ea) <- runFrom (fromItem fa)
+    (bb, eb) <- runFrom (fromItem fb)
+    let Expr _ onexpr = f ea eb
+        bres = (addParens ba) <> "RIGHT JOIN" <> addParens bb <> " ON " <> onexpr
+    return (bres, Nullable ea :. eb)
+
+fullJoin :: (FromItem fa a, FromItem fb b)
+         => fa -> fb -> (a -> b -> Expr Bool)
+         -> From (Nullable a :. Nullable b)
+fullJoin fa fb f = From $ do
+    (ba, ea) <- runFrom (fromItem fa)
+    (bb, eb) <- runFrom (fromItem fb)
+    let Expr _ onexpr = f ea eb
+        bres = (addParens ba) <> "FULL JOIN" <> addParens bb <> " ON " <> onexpr
+    return (bres, Nullable ea :. Nullable eb)
 
 exists :: (IsQuery m) => Query (Expr a) -> m (Expr Bool)
 exists mq = do
@@ -501,7 +540,7 @@ compileUnion un q f = do
    nm <- newName_
    (exprNonRec, queryNonRec) <- compIt q
    renamed <- asRenamed exprNonRec
-   let frm = From . return $ FromQuery nm renamed
+   let frm = From . return $ (nm, renamed)
    (exprRec, queryRec) <- compIt $ f frm
    let bld = namedRow nm renamed
            <> " AS (" <> finishIt (asValues exprNonRec) queryNonRec
@@ -563,27 +602,27 @@ escapeIdentifier conn s =
 
 buildQuery :: ExprBuilder -> ByteString
 buildQuery = toStrict . toLazyByteString
-
+{-
 cross :: (IsRecord a, IsRecord b) => From a -> From b -> From (a:.b)
 cross = crossJoin
-
+-}
 on :: (( a-> b-> Expr Bool) -> From (a:.b)) -> (a -> b -> Expr Bool) -> From (a:.b)
 on f b = f b
-
+{-
 inner :: forall a b .(IsRecord a, IsRecord b) =>
    From a -> From b -> (a -> b -> Expr Bool) -> From (a:.b)
 inner = innerJoin
-
-infixr 3 `inner`
+-}
+--infixr 3 `inner`
 infixl 2 `on`
 
-infixr 3 `cross`
+--infixr 3 `cross`
 
 from' :: (IsQuery m, FromItem f a) => f -> (a -> m b) -> m b
 from' fi f = do
   ns <- grabNS
   let (frm, ns') = runState (runFrom $ fromItem fi) ns
-      (cmp, expr) = compileFrom frm
+      (cmp, expr) = frm
   appendFrom cmp
   modifyNS $ const ns'
   r <- f expr
@@ -599,7 +638,7 @@ with' mq act = do
   let bld = namedRow nm renamed
             <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
   appendWith bld
-  act $ From . return $ FromQuery nm renamed
+  act $ From . return $ (nm, renamed)
 
 
 exists' :: IsRecord a => Query a -> Expr a

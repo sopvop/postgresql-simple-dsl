@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -40,6 +41,7 @@ import           Data.ByteString.Builder (Builder, char8, byteString)
 import           Database.PostgreSQL.Simple           ((:.) (..), Only (..))
 import           Database.PostgreSQL.Simple.FromField as PG hiding (Field)
 import           Database.PostgreSQL.Simple.FromRow   as PG
+import qualified Database.PostgreSQL.Simple.Types     as PG
 import           Database.PostgreSQL.Simple.ToField
 
 import           Database.PostgreSQL.Simple.Dsl.Types
@@ -140,6 +142,63 @@ takeField = recField
 class FromRecord a b where
   fromRecord :: a -> RecordParser b
 
+newtype Nullable a = Nullable { getNullable :: a }
+        deriving (Eq, Ord, Functor)
+
+
+justNullable :: Nullable a -> a
+justNullable = getNullable
+
+fromNullable :: NulledRecord a b => Nullable a -> b
+fromNullable = nulled . getNullable
+
+type family Nulled a where
+  Nulled (Maybe a) = Maybe a
+  Nulled b = Maybe b
+
+class NulledRecord a b | a -> b where
+  nulled :: a -> b
+
+instance n ~ Nulled a => NulledRecord (Expr a) (Expr n) where
+  nulled = coerce
+  {-# INLINE nulled #-}
+
+instance (n1 ~Nulled e1, n2 ~ Nulled e2) =>
+   NulledRecord (Expr e1, Expr e2) (Expr n1, Expr n2) where
+  nulled = coerce
+  {-# INLINE nulled #-}
+
+instance (n1 ~Nulled e1, n2 ~ Nulled e2, n3 ~ Nulled e3) =>
+   NulledRecord (Expr e1, Expr e2, Expr e3) (Expr n1, Expr n2, Expr n3) where
+  nulled = coerce
+  {-# INLINE nulled #-}
+
+instance (NulledRecord a na , NulledRecord b nb)
+   => NulledRecord ( a :. b) (na :. nb) where
+  nulled (a :. b) = nulled a :. nulled b
+  {-# INLINE nulled #-}
+
+instance NulledRecord (PGRecord '[]) (PGRecord '[]) where
+  nulled = id
+
+instance forall a av nv bs nbs . (nv ~ Nulled av, NulledRecord (PGRecord bs) (PGRecord nbs))
+  =>  NulledRecord (PGRecord (a :-> Expr av ': bs)) (PGRecord ( a :-> Expr nv ': nbs)) where
+  nulled (Identity a :& bs) = Proxy =: coerce a <+> nulled bs
+
+
+instance (FromRecord a b) => FromRecord (Nullable a) (Maybe b) where
+  fromRecord r = nullableParser parser
+    where
+      parser = fromRecord (getNullable r) :: RecordParser b
+
+nullableParser :: RecordParser a -> RecordParser (Maybe a)
+nullableParser parser = RecordParser cols (pure Nothing <* replicateM_ (length cols) fnull
+                                    <|> fmap Just rowP )
+  where
+    RecordParser cols rowP = parser
+    fnull :: RowParser PG.Null
+    fnull =  PG.field
+
 instance IsRecord (Expr a) where
   asValues (Expr _ a) = [a]
   asRenamed _ = liftM term newName_
@@ -189,7 +248,6 @@ instance (FromField a, FromField b, FromField c, FromField d, FromField e, FromF
          FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) (a,b,c,d,e, f) where
   fromRecord (a,b,c,d,e,f) = (,,,,,) <$> recField a <*> recField b <*> recField c
                                      <*> recField d <*> recField e <*> recField f
-
 
 instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) where
   asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d, Expr _ e, Expr _ f, Expr _ g) = [a,b,c,d,e,f,g]
@@ -501,12 +559,6 @@ compileQuery q = evalState comp (emptyQuery :: QueryState t)
      (r,q') <- compIt q
      return $ finishIt (asValues r) q'
 
-data FromD a where
-   FromTable      :: ByteString -> Builder -> a -> FromD a
-   FromQuery      :: ExprBuilder -> a -> FromD a
-   FromInnerJoin  :: FromD a -> FromD b -> ExprBuilder -> FromD (a:.b)
-   FromCrossJoin  :: FromD a -> FromD b -> FromD (a:.b)
-
 data Table a = Table !Text
 
 -- | class for things which can be used in FROM clause
@@ -523,17 +575,10 @@ instance (IsRecord a) => FromItem (Query a) a where
      renamed <- asRenamed r
      let bld = char8 '(' <> finishIt (asValues r) q <> ") AS "
                <> namedRow nm renamed
-     return $ FromQuery bld renamed
+     return $ (bld, renamed)
 
 
-fromToExpr :: FromD a -> a
-fromToExpr (FromTable _ _ a) = a
-fromToExpr (FromQuery _ a) = a
-fromToExpr (FromInnerJoin a b _) = fromToExpr a :. fromToExpr b
-fromToExpr (FromCrossJoin a b) = fromToExpr a :. fromToExpr b
-{-# INLINE fromToExpr #-}
-
-newtype From a = From { runFrom :: State NameSource (FromD a) }
+newtype From a = From { runFrom :: State NameSource (ExprBuilder, a) }
 
 namedRow :: IsRecord a => ExprBuilder -> a -> ExprBuilder
 namedRow nm r = nm <> char8 '(' <> commaSep (asValues r) <> char8 ')'
@@ -543,22 +588,6 @@ instance HasNameSource (State NameSource) where
   modifyNS f = modify f
   {-# INLINE grabNS #-}
   {-# INLINE modifyNS #-}
-
-compileFrom :: FromD a -> (ExprBuilder, a)
-compileFrom (FromTable bs alias a) =
-  (escapeIdentifier bs <> " AS " <> alias, a)
-compileFrom (FromQuery bs a) = (bs, a)
-compileFrom (FromInnerJoin a b cond) = (bld, ea:.eb)
-  where
-    (ca, ea) = compileFrom a
-    (cb, eb) = compileFrom b
-    bld = ca <> "\nINNER JOIN " <> cb <> " ON " <> cond
-
-compileFrom (FromCrossJoin a b) = (ca <> ", " <> cb, ea:.eb)
-  where
-    (ca, ea) = compileFrom a
-    (cb, eb) = compileFrom b
-
 
 finishQuery :: (a -> RecordParser b) -> Query a -> (ExprBuilder, RowParser b)
 finishQuery fromRec mq = evalState finisher $ (emptyQuery :: QueryState ())
@@ -755,7 +784,7 @@ instance forall a r. (RecExpr (PGRecord a), r~(PGRecord a)) =>
     alias <- byteString <$> grabName --Alias bs nameBld
     let r = mkRecExpr (alias <> char8 '.') (undefined :: PGRecord a)
         q = nameBld <> " AS " <> alias
-    return $ FromQuery q r
+    return $ (q, r)
 
 
 update :: forall a b . RecExpr a => Table a -> (a -> Updating a b) -> Update b

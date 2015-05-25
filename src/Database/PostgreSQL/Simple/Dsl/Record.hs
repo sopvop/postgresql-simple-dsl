@@ -18,6 +18,8 @@ module Database.PostgreSQL.Simple.Dsl.Record
   , (=:)
   , (<+>)
   , (.>)
+  , (?>)
+  , (.?>)
   , (=.)
   , (=.!)
   , Updater
@@ -37,6 +39,7 @@ import           GHC.TypeLits
 
 import           Control.Monad.Identity
 import           Control.Monad.Trans.State.Strict        (State, execState, modify)
+import           Data.Coerce
 import qualified Data.HashMap.Strict                     as HashMap
 import           Data.Proxy
 import qualified Data.Text                               as T
@@ -56,6 +59,18 @@ r .> f = getCol . runIdentity $ rget f r
 
 infixl 8 .>
 {-# INLINE (.>) #-}
+
+infixl 8 ?>
+{-# INLINE (?>) #-}
+(?>) :: (nc ~ Nulled c, IElem (t :-> Expr c) rs)
+     => Nullable (PGRecord rs) -> proxy (t :-> Expr c) -> Expr nc
+r ?> f = coerce . getCol . runIdentity $ rget f (getNullable r)
+
+infixl 8 .?>
+{-# INLINE (.?>) #-}
+(.?>) :: (IElem (t :-> Expr c) rs)
+     => Nullable (PGRecord rs) -> proxy (t :-> Expr c) -> Expr c
+r .?> f = getCol . runIdentity $ rget f (getNullable r)
 
 newtype UpdaterM t a = UpdaterM (State (HashMap.HashMap T.Text ExprBuilder) a)
 
@@ -105,3 +120,4 @@ infixr 7 =., =.!
 setR :: (KnownSymbol t, IElem (t :-> Expr a) s) =>
      proxy (t :-> Expr a) -> Expr a -> UpdExpr (PGRecord s)
 setR fld (Expr _ a) = UpdExpr $ HashMap.singleton (fieldName fld) a
+
