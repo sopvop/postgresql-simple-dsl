@@ -88,6 +88,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , unsafeCast
      , selectExpr
      , cast
+     , (+.), (-.)
      -- * Helpers
      , Only(..)
      , (:.)(..)
@@ -121,6 +122,7 @@ import           Data.ByteString.Builder                 (byteString, char8,
 import           Data.ByteString.Lazy                    (toStrict)
 import qualified Data.HashMap.Strict                     as HashMap
 import           Data.Int                                (Int64)
+import           Data.List                               (intersperse)
 import           Data.Maybe
 import           Data.Monoid
 import           Data.Text                               (Text)
@@ -253,7 +255,7 @@ table = Table
 
 compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (ExprBuilder, a)
 compileValues vals renamed = do
-  nm <- newName_
+  nm <- grabName
   let res = "(VALUES " <> body <> ") AS " <> namedRow nm renamed
   return $ (res, renamed)
   where
@@ -283,7 +285,7 @@ where_ = appendWhereExpr
 select :: (IsRecord b) => Query b -> From b
 select mq = From $ do
   (r, q) <- compIt mq
-  nm <- newName_
+  nm <- grabName
   renamed <- asRenamed r
   let bld = char8 '(' <> finishIt (asValues r) q <> ") AS "
             <> namedRow nm renamed
@@ -299,7 +301,7 @@ with :: (IsRecord b) => Query b -> (From b -> Query c) -> Query c
 with mq act = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
-  nm <- newName_
+  nm <- grabName
   let bld = namedRow nm renamed
             <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
   appendWith bld
@@ -309,7 +311,7 @@ withUpdate :: (IsRecord b, IsQuery m) => Update b -> (From b -> m c) -> m c
 withUpdate (Update mq) act = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
-  nm <- newName_
+  nm <- grabName
   let returnings = asValues e
       body = queryAction q <> "\nRETURNING " <> commaSep returnings
       bld = namedRow nm renamed <> " AS ( "  <> body <> char8 ')'
@@ -334,14 +336,14 @@ innerJoin fa fb f = From $ do
     (ba, ea) <- runFrom (fromItem fa)
     (bb, eb) <- runFrom (fromItem fb)
     let Expr _ onexpr = f ea eb
-        bres = (addParens ba) <> "INNER JOIN" <> addParens bb <> " ON " <> onexpr
+        bres = ba <> " INNER JOIN " <> bb <> " ON " <> onexpr
     return (bres, ea :. eb)
 
 crossJoin :: From a -> From b -> From (a :. b)
 crossJoin (From mfa) (From mfb) = From $ do
     (ba, ea) <- mfa
     (bb, eb) <- mfb
-    let bres = (addParens ba) <> "CROSS JOIN" <> addParens bb
+    let bres = addParens (ba <> " CROSS JOIN " <> addParens bb)
     return (bres, ea :. eb)
 
 leftJoin :: (FromItem fa a, FromItem fb b)
@@ -351,7 +353,7 @@ leftJoin fa fb f = From $ do
     (ba, ea) <- runFrom (fromItem fa)
     (bb, eb) <- runFrom (fromItem fb)
     let Expr _ onexpr = f ea eb
-        bres = (addParens ba) <> "LEFT JOIN" <> addParens bb <> " ON " <> onexpr
+        bres = addParens (ba <> " LEFT JOIN " <> bb <> " ON " <> onexpr)
     return (bres, ea :. Nullable eb)
 
 rightJoin :: (FromItem fa a, FromItem fb b)
@@ -361,7 +363,7 @@ rightJoin fa fb f = From $ do
     (ba, ea) <- runFrom (fromItem fa)
     (bb, eb) <- runFrom (fromItem fb)
     let Expr _ onexpr = f ea eb
-        bres = (addParens ba) <> "RIGHT JOIN" <> addParens bb <> " ON " <> onexpr
+        bres = addParens (ba <> " RIGHT JOIN " <> addParens bb <> " ON " <> onexpr)
     return (bres, Nullable ea :. eb)
 
 fullJoin :: (FromItem fa a, FromItem fb b)
@@ -371,7 +373,7 @@ fullJoin fa fb f = From $ do
     (ba, ea) <- runFrom (fromItem fa)
     (bb, eb) <- runFrom (fromItem fb)
     let Expr _ onexpr = f ea eb
-        bres = (addParens ba) <> "FULL JOIN" <> addParens bb <> " ON " <> onexpr
+        bres = addParens (ba <> " FULL JOIN " <> addParens bb <> " ON " <> onexpr)
     return (bres, Nullable ea :. Nullable eb)
 
 exists :: (IsQuery m) => Query (Expr a) -> m (Expr Bool)
@@ -385,17 +387,15 @@ orderBy :: Sorting -> Query ()
 orderBy f | sortingEmpty f = return ()
           | otherwise = modify $ \st -> let or' = queryStateOrder st
                                         in st { queryStateOrder = go or' }
-   where go Nothing = Just sort
-         go (Just o) = Just $ o <> char8 ',' <> sort
-         sort = compileSorting f
+   where go o = o <> Just f
 
 -- | ascend on expression
 ascendOn :: (Expr a) -> Sorting
-ascendOn (Expr _ a) = Sorting [a <> " ASC"]
+ascendOn (Expr _ a) = Sorting [(a, " ASC")]
 
 -- | descend on expression
 descendOn :: Expr t -> Sorting
-descendOn (Expr _ a) = Sorting [a <> " DESC"]
+descendOn (Expr _ a) = Sorting [(a, " DESC")]
 
 -- | set LIMIT
 limitTo :: Int -> Query ()
@@ -407,8 +407,9 @@ offsetTo = modifyOffset . const . Just
 distinct :: Query ()
 distinct = modifyDistinct $ const Distinct
 
-distinctOn :: Expr t -> Query ()
-distinctOn (Expr _ e) = modifyDistinct . const $ DistinctOn e
+distinctOn :: Sorting -> Query ()
+distinctOn s = do
+    modifyDistinct . const $ DistinctOn s
 
 -- | Execute query and get results
 queryWith :: Connection -> (a -> RecordParser r) -> Query a -> IO [r]
@@ -431,6 +432,13 @@ formatQuery q = buildQuery $ compileQuery q
 -- | lift value to Expr
 val :: (ToField a ) => a -> Expr a
 val = term . rawField
+
+infixl 6 +., -.
+
+(-.) :: IsExpr expr => expr a -> expr a -> expr a
+a -. b = binOp 6 (char8 '-') a b
+(+.) :: IsExpr expr => expr a -> expr a -> expr a
+a +. b = binOp 6 (char8 '-') a b
 
 infix 4 ==., /=., <., <=., >., >=.
 
@@ -537,7 +545,7 @@ unionAll = Recursive UnionAll
 
 compileUnion :: (IsRecord a) => Union -> Query a -> (From a -> Query a) -> Query (From a)
 compileUnion un q f = do
-   nm <- newName_
+   nm <- grabName
    (exprNonRec, queryNonRec) <- compIt q
    renamed <- asRenamed exprNonRec
    let frm = From . return $ (nm, renamed)
@@ -634,7 +642,7 @@ with' :: (IsRecord a, IsQuery m) => Query a -> (From a -> m b) -> m b
 with' mq act = do
   (e, q) <- compIt mq
   renamed <- asRenamed e
-  nm <- newName_
+  nm <- grabName
   let bld = namedRow nm renamed
             <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
   appendWith bld

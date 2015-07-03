@@ -1,23 +1,23 @@
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE TypeFamilies               #-}
-{-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE TypeOperators              #-}
 
-import Data.ByteString (ByteString)
-import qualified Data.ByteString.Char8 as B
+import           Data.ByteString                      (ByteString)
+import qualified Data.ByteString.Char8                as B
 
-import Control.Applicative
-import Control.Monad
+import           Control.Applicative
+import           Control.Monad
 
-import Data.Monoid
-import Data.Proxy
-import Database.PostgreSQL.Simple           (Connection, connectPostgreSQL)
-import Database.PostgreSQL.Simple.Dsl
-import Database.PostgreSQL.Simple.FromField hiding (Field, takeField)
-import Database.PostgreSQL.Simple.FromRow
-import Database.PostgreSQL.Simple.ToField
+import           Data.Monoid
+import           Data.Proxy
+import           Database.PostgreSQL.Simple           (Connection, connectPostgreSQL)
+import           Database.PostgreSQL.Simple.Dsl
+import           Database.PostgreSQL.Simple.FromField hiding (Field, takeField)
+import           Database.PostgreSQL.Simple.FromRow
+import           Database.PostgreSQL.Simple.ToField
 
 infixl 1 &
 
@@ -37,7 +37,7 @@ data User = User { userId :: UserId
 
 data Role = Role { roleUserId :: UserId, roleName :: ByteString }
         deriving (Show)
-
+{-
 instance Table User where
   tableName _ = "users"
 
@@ -170,3 +170,4 @@ main = do
   printQ con $ agg
   mapM_ print <=< query con $ agg
 
+-}

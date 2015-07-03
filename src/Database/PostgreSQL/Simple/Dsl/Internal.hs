@@ -22,8 +22,6 @@ import           Control.Monad.State.Class
 import           Control.Monad.Trans.State            (State, evalState,
                                                        runState)
 import           Control.Monad.Trans.Writer
-import           Data.ByteString                      (ByteString)
-import qualified Data.ByteString.Char8                as B
 import           Data.Coerce
 import           Control.Monad.Identity
 import           Data.HashMap.Strict                  (HashMap)
@@ -34,9 +32,7 @@ import           Data.Proxy                           (Proxy (..))
 import           Data.Text                            (Text)
 import qualified Data.Text.Encoding                   as T
 
-import           Data.Vinyl.Core (Rec(..), (<+>), rappend)
-
-import           Data.ByteString.Builder (Builder, char8, byteString)
+import           Data.ByteString.Builder (Builder, char8, intDec)
 
 import           Database.PostgreSQL.Simple           ((:.) (..), Only (..))
 import           Database.PostgreSQL.Simple.FromField as PG hiding (Field)
@@ -106,8 +102,6 @@ newtype NameSource = NameSource Int
 
 mkNameSource :: NameSource
 mkNameSource = NameSource 0
-grabNameFromSrc :: NameSource -> (String, NameSource)
-grabNameFromSrc (NameSource n) = ('_':'_':'q': show n, NameSource $ succ n)
 
 instance Show NameSource where
   show _ = "NameSource"
@@ -183,7 +177,7 @@ instance NulledRecord (PGRecord '[]) (PGRecord '[]) where
 
 instance forall a av nv bs nbs . (nv ~ Nulled av, NulledRecord (PGRecord bs) (PGRecord nbs))
   =>  NulledRecord (PGRecord (a :-> Expr av ': bs)) (PGRecord ( a :-> Expr nv ': nbs)) where
-  nulled (Identity a :& bs) = Proxy =: coerce a <+> nulled bs
+  nulled (a :& bs) = Proxy =: coerce a <+> nulled bs
 
 
 instance (FromRecord a b) => FromRecord (Nullable a) (Maybe b) where
@@ -201,7 +195,7 @@ nullableParser parser = RecordParser cols (pure Nothing <* replicateM_ (length c
 
 instance IsRecord (Expr a) where
   asValues (Expr _ a) = [a]
-  asRenamed _ = liftM term newName_
+  asRenamed _ = liftM term grabName
 
 instance (FromField a) => FromRecord (Expr a) a where
   fromRecord (Expr p e) = recField $ Expr p e
@@ -368,7 +362,7 @@ instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f, Expr
 
 
 
-data Distinct = DistinctAll | Distinct | DistinctOn ExprBuilder
+data Distinct = DistinctAll | Distinct | DistinctOn Sorting
 
 data QueryState t = QueryState
   { queryStateWith      :: Maybe ExprBuilder
@@ -376,7 +370,7 @@ data QueryState t = QueryState
   , queryStateRecursive :: Any
   , queryStateFrom      :: Maybe ExprBuilder
   , queryStateWhere     :: Maybe ExprBuilder
-  , queryStateOrder     :: Maybe ExprBuilder
+  , queryStateOrder     :: Maybe Sorting
   , queryStateGroupBy   :: Maybe ExprBuilder
   , queryStateHaving    :: Maybe ExprBuilder
   , queryStateLimit     :: Maybe Int
@@ -398,24 +392,17 @@ instance HasNameSource (QueryM t) where
   {-# INLINE grabNS #-}
   {-# INLINE modifyNS #-}
 
-grabName :: HasNameSource m => m ByteString
+grabName :: HasNameSource m => m Builder
 grabName = do
   NameSource n <- grabNS
   modifyNS . const . NameSource $ succ n
-  return $ B.pack  $ '_':'_':'q': show n
+  return $ char8 'q' <> intDec n
 
 {-# INLINE grabName #-}
 
 newExpr :: HasNameSource m => m (Expr a)
-newExpr = liftM term  $ newName_
+newExpr = liftM term  $ grabName
 {-# INLINE newExpr #-}
-
-newName_ :: HasNameSource m => m Builder
-newName_ = do
-  nm <- grabName
-  return $ byteString nm
-{-# INLINE newName_ #-}
-
 
 newtype QueryM t a = QueryM { runQuery :: State (QueryState t) a }
         deriving (Functor, Monad, Applicative, MonadState (QueryState t))
@@ -535,11 +522,11 @@ finishIt expr QueryState{..} = execWriter $ do
   tell $ commaSep expr
   forM_ queryStateFrom $ \f -> tell ("\nFROM " <> f)
   forM_ queryStateWhere $ \w -> tell ("\nWHERE " <> w)
-  forM_ queryStateOrder $ \o -> tell ("\nORDER BY " <> o)
   forM_ queryStateGroupBy $ \b -> do
      tell $ "\nGROUP BY " <> b
   forM_ queryStateHaving $ \b -> do
      tell $ "\nHAVING " <> b
+  forM_ order $ \o -> tell ("\nORDER BY " <> compileSorting o)
   forM_ queryStateLimit $ \l -> do
      tell $ "\nLIMIT " <> escapeAction (toField l)
   forM_ queryStateOffset $ \o -> do
@@ -548,7 +535,13 @@ finishIt expr QueryState{..} = execWriter $ do
     distinct d = case d of
       DistinctAll -> mempty
       Distinct -> "DISTINCT "
-      DistinctOn e -> "DISTINCT ON (" <> e <>  ") "
+      DistinctOn (Sorting e) -> "DISTINCT ON (" <> (mconcat $ intersperse "," $ map fst e) 
+                 <>  ") "
+    distinctOrder = case queryStateDistinct of
+        DistinctOn es -> Just es
+        _ -> Nothing
+
+    order = distinctOrder <> queryStateOrder
     withStart = if getAny queryStateRecursive then "\nWITH RECURSIVE "
                  else "\nWITH "
 
@@ -571,7 +564,7 @@ instance FromItem (From a) a where
 instance (IsRecord a) => FromItem (Query a) a where
   fromItem mq = From $ do
      (r, q) <- compIt mq
-     nm <- newName_
+     nm <- grabName
      renamed <- asRenamed r
      let bld = char8 '(' <> finishIt (asValues r) q <> ") AS "
                <> namedRow nm renamed
@@ -603,7 +596,7 @@ finishQueryNoRet mq = evalState finisher (emptyQuery :: QueryState ())
       (_, q') <- compIt mq
       return $ finishIt ["true"] q'
 
-newtype Sorting = Sorting [ExprBuilder]
+newtype Sorting = Sorting [(ExprBuilder, ExprBuilder)]
   deriving (Monoid)
 
 sortingEmpty :: Sorting -> Bool
@@ -612,7 +605,8 @@ sortingEmpty _ = False
 {-# INLINE sortingEmpty #-}
 
 compileSorting :: Sorting -> ExprBuilder
-compileSorting (Sorting r) = mconcat $ intersperse (char8 ',') r
+compileSorting (Sorting r) = mconcat . intersperse (char8 ',')
+               . map (\(expr, order) -> (expr <> order)) $ r
 {-# INLINE compileSorting #-}
 
 newtype UpdExpr a = UpdExpr { getUpdates :: HashMap Text ExprBuilder }
@@ -743,8 +737,8 @@ data Recursive a = Recursive Union (Query a) (From a -> Query a)
 instance IsRecord (PGRecord ((t :-> Expr a) ': '[])) where
   asRenamed (a :& _) = do
     n <- newExpr
-    return $ fmap (fmap $ const n) a :& RNil
-  asValues (Identity a :& _) = [getRawExpr $ getCol a]
+    return $ fmap (const n) a :& RNil
+  asValues (a :& _) = [getRawExpr $ getCol a]
 
 instance (IsRecord (PGRecord (b ': c))) =>
          IsRecord (PGRecord (t :-> Expr a ': b ': c)) where
@@ -752,16 +746,16 @@ instance (IsRecord (PGRecord (b ': c))) =>
     n <- newExpr
     res <- asRenamed $ xs
     return $ Proxy =: n <+> res
-  asValues (Identity a :& as) = getRawExpr (getCol a) : asValues as
+  asValues (a :& as) = getRawExpr (getCol a) : asValues as
 
 instance FromField a => FromRecord (PGRecord '[t :-> Expr a]) (PGRecord '[ t :-> a]) where
-  fromRecord (Identity r :& _) = (Proxy =:) <$> recField (getCol r)
+  fromRecord (r :& _) = (Proxy =:) <$> recField (getCol r)
 
 instance (FromRecord (PGRecord (b ': c)) (PGRecord (b' ': c')), FromField a) =>
    FromRecord (PGRecord (t :-> Expr a ': (b ': c)))
    (PGRecord ( t :-> a ': (b' ': c'))) where
-  fromRecord (Identity a :& as) = (\a' b' -> Proxy =: a' <+> b') <$> recField (getCol a)
-                                                                 <*> fromRecord as
+  fromRecord (a :& as) = (\a' b' -> Proxy =: a' <+> b') <$> recField (getCol a)
+                                                        <*> fromRecord as
 
 class RecExpr a where
   mkRecExpr :: ExprBuilder -> a -> a
@@ -781,7 +775,7 @@ instance forall a r. (RecExpr (PGRecord a), r~(PGRecord a)) =>
   fromItem (Table nm) = From $ do
     let bs = T.encodeUtf8 nm
         nameBld = escapeIdentifier bs
-    alias <- byteString <$> grabName --Alias bs nameBld
+    alias <- grabName --Alias bs nameBld
     let r = mkRecExpr (alias <> char8 '.') (undefined :: PGRecord a)
         q = nameBld <> " AS " <> alias
     return $ (q, r)
@@ -789,7 +783,7 @@ instance forall a r. (RecExpr (PGRecord a), r~(PGRecord a)) =>
 
 update :: forall a b . RecExpr a => Table a -> (a -> Updating a b) -> Update b
 update (Table nm) f = Update $ do
-  alias <- byteString <$> grabName
+  alias <- grabName
   let r = mkRecExpr (alias <> char8 '.') (undefined :: a)
       q = nameBld <> " AS " <> alias
       upd = f r
@@ -799,7 +793,7 @@ update (Table nm) f = Update $ do
 
 delete :: forall a  b . RecExpr a => Table a -> (a -> Deleting a b) -> Update b
 delete (Table nm) f = do
-  alias <- byteString <$> grabName
+  alias <- grabName
   let r = mkRecExpr (alias <> char8 '.') (undefined :: a)
       q = nameBld <> " AS " <> alias
       upd = f r

@@ -27,10 +27,10 @@ count (Expr _ a) = ExprA . Expr 0 $ byteString "count(" <> a <> char8 ')'
 countAll :: ExprA Int64
 countAll = ExprA $ Expr 0 (byteString "count(*)")
 
-sum_ :: Expr a -> ExprA a
+sum_ :: Expr a -> ExprA (Nulled a)
 sum_ (Expr _ a) = ExprA $ Expr 0 (byteString "sum(" <> a <> char8 ')')
 
-max_ :: Expr a -> ExprA a
+max_ :: Expr a -> ExprA (Nulled a)
 max_ (Expr _ a) = ExprA $ Expr 0 (byteString "max(" <> a <> char8 ')')
 
 array_agg :: (Expr a) -> ExprA (Maybe (PGArray a))
