@@ -81,6 +81,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      -- * Expressions
      , Expr
      , val
+     , val'
      , (==.), (/=.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
      , true, false, just, isNull, isInList
      , not_
@@ -105,7 +106,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , having
      , groupBy
      , from'
-     , with'
+--     , with'
 --     , cross
 --     , inner
 --     , on
@@ -296,7 +297,7 @@ selectExpr mq = do
   (r, q) <- compIt mq
   let bld = char8 '(' <> finishIt (asValues r) q <> char8 ')'
   return $ Expr 0 bld
-
+{-
 with :: (IsRecord b) => Query b -> (From b -> Query c) -> Query c
 with mq act = do
   (e, q) <- compIt mq
@@ -306,6 +307,17 @@ with mq act = do
             <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
   appendWith bld
   act $ From . return $ (nm, renamed)
+-}
+with :: (IsRecord a, IsQuery m) => Query a -> (From a -> m b) -> m b
+with mq act = do
+  (e, q) <- compIt mq
+  renamed <- asRenamed e
+  nm <- grabName
+  let bld = namedRow nm renamed
+            <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
+  appendWith bld
+  act $ From . return $ (nm, renamed)
+
 
 withUpdate :: (IsRecord b, IsQuery m) => Update b -> (From b -> m c) -> m c
 withUpdate (Update mq) act = do
@@ -433,12 +445,15 @@ formatQuery q = buildQuery $ compileQuery q
 val :: (ToField a ) => a -> Expr a
 val = term . rawField
 
+val' :: (ToField a, IsExpr expr) => a -> expr a
+val' = fromExpr . term . rawField
+
 infixl 6 +., -.
 
 (-.) :: IsExpr expr => expr a -> expr a -> expr a
 a -. b = binOp 6 (char8 '-') a b
 (+.) :: IsExpr expr => expr a -> expr a -> expr a
-a +. b = binOp 6 (char8 '-') a b
+a +. b = binOp 6 (char8 '+') a b
 
 infix 4 ==., /=., <., <=., >., >=.
 
@@ -637,17 +652,6 @@ from' fi f = do
   return r
 
 {-# INLINE from' #-}
-
-with' :: (IsRecord a, IsQuery m) => Query a -> (From a -> m b) -> m b
-with' mq act = do
-  (e, q) <- compIt mq
-  renamed <- asRenamed e
-  nm <- grabName
-  let bld = namedRow nm renamed
-            <> " AS ( " <> finishIt (asValues e) q <> char8 ')'
-  appendWith bld
-  act $ From . return $ (nm, renamed)
-
 
 exists' :: IsRecord a => Query a -> Expr a
 exists' mq = term $ " EXISTS (" <> body <> char8 ')'
