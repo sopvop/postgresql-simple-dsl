@@ -15,6 +15,7 @@ module Database.PostgreSQL.Simple.Dsl.Functions
        , array_prepend
        , array_cat
        , array_empty
+       , array_contains
        , least
        , greatest
        ) where
@@ -81,6 +82,11 @@ array_cat (Expr _ a) (Expr _ b) = Expr 0 $
 
 array_empty :: (Expr (PGArray a))
 array_empty = term $ byteString "ARRAY[]"
+
+-- | operator @>
+array_contains :: Expr (PGArray a) -> Expr (PGArray a) -> Expr Bool
+array_contains a b = binOp 10 (byteString "@>") a b
+
 
 
 least :: IsExpr expr => expr a -> expr a -> expr a

@@ -28,6 +28,8 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , FromItem
      , From
      , from
+     , Lateral(..)
+     , fromLateral
      , table
      , select
      , values
@@ -253,6 +255,10 @@ import           GHC.TypeLits                            (KnownSymbol)
 table :: Text -> Table a
 table = Table
 {-# INLINE table #-}
+
+fromLateral :: (IsRecord a, IsQuery m) => Query a -> m a
+fromLateral = from . Lateral
+
 
 compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (ExprBuilder, a)
 compileValues vals renamed = do

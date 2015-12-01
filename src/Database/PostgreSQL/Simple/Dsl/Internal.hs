@@ -576,6 +576,23 @@ newtype From a = From { runFrom :: State NameSource (ExprBuilder, a) }
 namedRow :: IsRecord a => ExprBuilder -> a -> ExprBuilder
 namedRow nm r = nm <> char8 '(' <> commaSep (asValues r) <> char8 ')'
 
+newtype Lateral a = Lateral (Query a)
+
+instance (IsRecord a) => FromItem (Lateral a) a where
+  fromItem (Lateral mq) = From $ do
+     (r, q) <- compIt mq
+     nm <- grabName
+     renamed <- asRenamed r
+     let bld = " LATERAL (" <> finishIt (asValues r) q <> ") AS "
+               <> namedRow nm renamed
+     return $ (bld, renamed)
+
+instance RecExpr (Rec a) => FromItem (Function (Rec a)) (Rec a) where
+  fromItem (Function nm args) = From $ do
+    alias <- grabName --Alias bs nameBld
+    let r = mkRecExpr (alias <> char8 '.') (undefined :: PGRecord a)
+    pure (escapeIdent nm <> char8 '(' <> commaSep args <> ") AS " <> alias, r)
+
 instance HasNameSource (State NameSource) where
   grabNS = get
   modifyNS f = modify f
