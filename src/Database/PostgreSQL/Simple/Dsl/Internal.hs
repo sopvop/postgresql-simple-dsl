@@ -112,7 +112,10 @@ class (Monad m) => HasNameSource m where
 
 class IsRecord a where
   asValues  :: a -> [ExprBuilder]
-  asRenamed :: HasNameSource m => a -> m a
+  genNames :: HasNameSource m => Proxy a -> m a
+
+asRenamed :: forall a m . (IsRecord a, HasNameSource m) => a -> m a
+asRenamed _ = genNames (Proxy :: Proxy a)
 
 -- | Parser for entities with columns
 data RecordParser a = RecordParser
@@ -195,21 +198,22 @@ nullableParser parser = RecordParser cols (pure Nothing <* replicateM_ (length c
 
 instance IsRecord (Expr a) where
   asValues (Expr _ a) = [a]
-  asRenamed _ = liftM term grabName
+  genNames _ =  newExpr
 
 instance (FromField a) => FromRecord (Expr a) a where
   fromRecord (Expr p e) = recField $ Expr p e
 
 instance IsRecord (Expr a, Expr b) where
   asValues (Expr _ a, Expr _ b) = [a,b]
-  asRenamed _ = return (,) `ap` newExpr `ap` newExpr
+  genNames _ =  (,) <$> newExpr <*> newExpr
 
 instance (FromField a, FromField b) => FromRecord (Expr a, Expr b) (a,b) where
   fromRecord (a,b) = (,) <$> recField a <*> recField b
 
 instance IsRecord (Expr a, Expr b, Expr c) where
   asValues (Expr _ a, Expr _ b, Expr _ c) = [a,b,c]
-  asRenamed _ = return (,,) `ap` newExpr `ap` newExpr `ap` newExpr
+  genNames _ =  (,,) <$> newExpr <*> newExpr
+                     <*> newExpr
 
 instance (FromField a, FromField b, FromField c) =>
          FromRecord (Expr a, Expr b, Expr c) (a,b,c) where
@@ -217,7 +221,8 @@ instance (FromField a, FromField b, FromField c) =>
 
 instance IsRecord (Expr a, Expr b, Expr c, Expr d) where
   asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d) = [a,b,c,d]
-  asRenamed _ = return (,,,) `ap` newExpr `ap` newExpr `ap` newExpr `ap` newExpr
+  genNames _ =  (,,,) <$> newExpr <*> newExpr
+                      <*> newExpr <*> newExpr
 
 instance (FromField a, FromField b, FromField c, FromField d) =>
          FromRecord (Expr a, Expr b, Expr c, Expr d) (a,b,c,d) where
@@ -225,8 +230,9 @@ instance (FromField a, FromField b, FromField c, FromField d) =>
 
 instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e) where
   asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d, Expr _ e) = [a,b,c,d,e]
-  asRenamed _ = return (,,,,) `ap` newExpr `ap` newExpr `ap` newExpr `ap` newExpr
-                `ap` newExpr
+  genNames _ =  (,,,,) <$> newExpr <*> newExpr
+                       <*> newExpr <*> newExpr
+                       <*> newExpr
 
 instance (FromField a, FromField b, FromField c, FromField d, FromField e) =>
          FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e) (a,b,c,d, e) where
@@ -235,8 +241,9 @@ instance (FromField a, FromField b, FromField c, FromField d, FromField e) =>
 
 instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) where
   asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d, Expr _ e, Expr _ f) = [a,b,c,d,e,f]
-  asRenamed _ = return (,,,,,) `ap` newExpr `ap` newExpr `ap` newExpr `ap` newExpr
-                `ap` newExpr `ap` newExpr
+  genNames _ =  (,,,,,) <$> newExpr <*> newExpr
+                        <*> newExpr <*> newExpr
+                        <*> newExpr <*> newExpr
 
 instance (FromField a, FromField b, FromField c, FromField d, FromField e, FromField f) =>
          FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) (a,b,c,d,e, f) where
@@ -245,8 +252,10 @@ instance (FromField a, FromField b, FromField c, FromField d, FromField e, FromF
 
 instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) where
   asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d, Expr _ e, Expr _ f, Expr _ g) = [a,b,c,d,e,f,g]
-  asRenamed _ = return (,,,,,,) `ap` newExpr `ap` newExpr `ap` newExpr `ap` newExpr
-                `ap` newExpr `ap` newExpr `ap` newExpr
+  genNames _ = (,,,,,,) <$> newExpr <*> newExpr
+                        <*> newExpr <*> newExpr
+                        <*> newExpr <*> newExpr
+                        <*> newExpr
 
 instance (FromField a, FromField b, FromField c, FromField d
          , FromField e, FromField f, FromField g) =>
@@ -258,7 +267,7 @@ instance (FromField a, FromField b, FromField c, FromField d
 
 instance (IsRecord a, IsRecord b) => IsRecord (a:.b) where
   asValues (a:.b) = asValues a ++ asValues b
-  asRenamed ~(a:.b) = return (:.) `ap` asRenamed a `ap` asRenamed b
+  genNames _ = pure (:.) `ap` genNames Proxy `ap` genNames Proxy
 
 instance (FromRecord a a', FromRecord b b') => FromRecord (a :. b) (a':.b') where
   fromRecord (a:.b) = (:.) <$> fromRecord a <*> fromRecord b
@@ -752,18 +761,18 @@ data Union = UnionDistinct | UnionAll deriving (Eq, Show, Ord)
 data Recursive a = Recursive Union (Query a) (From a -> Query a)
 
 instance IsRecord (PGRecord ((t :-> Expr a) ': '[])) where
-  asRenamed (a :& _) = do
-    n <- newExpr
-    return $ fmap (const n) a :& RNil
   asValues (a :& _) = [getRawExpr $ getCol a]
+  genNames _ = do
+    n <- newExpr
+    pure $ Proxy =: n
 
 instance (IsRecord (PGRecord (b ': c))) =>
          IsRecord (PGRecord (t :-> Expr a ': b ': c)) where
-  asRenamed ( _ :& xs) = do
-    n <- newExpr
-    res <- asRenamed $ xs
-    return $ Proxy =: n <+> res
   asValues (a :& as) = getRawExpr (getCol a) : asValues as
+  genNames _ = do
+    n <- newExpr
+    res <- genNames (Proxy :: Proxy (PGRecord (b ': c)))
+    pure $ Proxy =: n <+> res
 
 instance FromField a => FromRecord (PGRecord '[t :-> Expr a]) (PGRecord '[ t :-> a]) where
   fromRecord (r :& _) = (Proxy =:) <$> recField (getCol r)
