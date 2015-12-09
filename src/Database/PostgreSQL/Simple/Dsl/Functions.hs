@@ -16,6 +16,8 @@ module Database.PostgreSQL.Simple.Dsl.Functions
        , array_cat
        , array_empty
        , array_contains
+       , array_to_string
+       , array_to_string2
        , least
        , greatest
        ) where
@@ -23,6 +25,7 @@ module Database.PostgreSQL.Simple.Dsl.Functions
 import           Data.ByteString.Builder                 (byteString, char8)
 import           Data.Int
 import           Data.Monoid
+import           Data.Text                               (Text)
 import           Database.PostgreSQL.Simple.Types        (PGArray (..))
 
 import           Database.PostgreSQL.Simple.Dsl.Internal
@@ -87,7 +90,11 @@ array_empty = term $ byteString "ARRAY[]"
 array_contains :: Expr (PGArray a) -> Expr (PGArray a) -> Expr Bool
 array_contains a b = binOp 10 (byteString "@>") a b
 
+array_to_string :: Expr (PGArray a) -> Expr Text -> Expr Text
+array_to_string a b = call . arg b . arg a $ function "array_to_string"
 
+array_to_string2 :: Expr (PGArray a) -> Expr Text -> Expr Text -> Expr Text
+array_to_string2 a b c = call . arg c . arg b . arg a $ function "array_to_string"
 
 least :: IsExpr expr => expr a -> expr a -> expr a
 least ea eb = fromExpr $ Expr 0
