@@ -56,10 +56,6 @@ type PGRecord xs = Rec xs
 (=:) :: proxy (t :-> a) -> a -> PGRecord '[t :-> a]
 _ =: a = Col a :& RNil
 
-(=::) :: proxy t a -> a -> PGRecord '[t :-> a]
-_ =:: a = Col a :& RNil
-
-
 
 data Nat = Z | S !Nat
 
@@ -115,12 +111,13 @@ class i ~ RIndex r rs => RElem (r :: *) (rs :: [*]) (i :: Nat) where
 
 instance RElem r (r ': rs) 'Z where
   rlens _ f (x :& xs) = fmap (:& xs) (f x)
-  {-# INLINE rlens #-}
+--  {-# INLINE rlens #-}
+  {-# NOINLINE rlens #-}
 
 instance (RIndex r (s ': rs) ~ 'S i, RElem r rs i) => RElem r (s ': rs) ('S i) where
   rlens p f (x :& xs) = fmap (x :&) (rlens p f xs)
-  {-# INLINE rlens #-}
-
+--  {-# INLINE rlens #-}
+  {-# NOINLINE rlens #-}
 -- This is an internal convenience stolen from the @lens@ library.
 lens :: Functor f
      => (t -> s)
@@ -129,7 +126,7 @@ lens :: Functor f
      -> t
      -> f b
 lens sa sbt afb s = fmap (sbt s) $ afb (sa s)
-{-# INLINE lens #-}
+--{-# INLINE lens #-}
 
 
 type IElem r rs = RElem r rs (RIndex r rs)
@@ -151,7 +148,7 @@ class is ~ RImage rs ss => RSubset (rs :: [*]) (ss :: [*]) is where
     :: Rec ss
     -> Rec rs
   rcast = getConst . rsubset Const
-  {-# INLINE rcast #-}
+--  {-# INLINE rcast #-}
 
   -- | The setter of the 'rsubset' lens is 'rreplace', which allows a slice of
   -- a record to be replaced with different values.
@@ -160,7 +157,7 @@ class is ~ RImage rs ss => RSubset (rs :: [*]) (ss :: [*]) is where
     -> Rec ss
     -> Rec ss
   rreplace rs = runIdentity . rsubset (\_ -> Identity rs)
-  {-# INLINE rreplace #-}
+--  {-# INLINE rreplace #-}
 
 instance RSubset '[] ss '[] where
   rsubset = lens (const RNil) const
