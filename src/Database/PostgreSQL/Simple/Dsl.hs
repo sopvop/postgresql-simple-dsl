@@ -1,10 +1,9 @@
 module Database.PostgreSQL.Simple.Dsl
   ( module Database.PostgreSQL.Simple.Dsl.Query
-  , module Database.PostgreSQL.Simple.Dsl.Record
   , module Database.PostgreSQL.Simple.Dsl.Functions
   ) where
 
 
-import           Database.PostgreSQL.Simple.Dsl.Functions
-import           Database.PostgreSQL.Simple.Dsl.Query
-import           Database.PostgreSQL.Simple.Dsl.Record
+import Database.PostgreSQL.Simple.Dsl.Functions
+import Database.PostgreSQL.Simple.Dsl.Query
+

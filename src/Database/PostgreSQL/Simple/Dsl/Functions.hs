@@ -22,13 +22,14 @@ module Database.PostgreSQL.Simple.Dsl.Functions
        , greatest
        ) where
 
-import           Data.ByteString.Builder                 (byteString, char8)
-import           Data.Int
-import           Data.Monoid
-import           Data.Text                               (Text)
-import           Database.PostgreSQL.Simple.Types        (PGArray (..))
+import Data.ByteString.Builder          (byteString, char8)
+import Data.Int
+import Data.Monoid
+import Data.Text                        (Text)
+import Database.PostgreSQL.Simple.Types (PGArray (..))
 
-import           Database.PostgreSQL.Simple.Dsl.Internal
+import Database.PostgreSQL.Simple.Dsl.Internal
+import Database.PostgreSQL.Simple.Dsl.Types
 
 count :: Expr a -> ExprA Int64
 count (Expr _ a) = ExprA . Expr 0 $ byteString "count(" <> a <> char8 ')'

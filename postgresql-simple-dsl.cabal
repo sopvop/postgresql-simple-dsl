@@ -2,7 +2,7 @@
 -- further documentation, see http://haskell.org/cabal/users-guide/
 
 name:                postgresql-simple-dsl
-version:             0.4.0.0
+version:             0.5.0.0
 synopsis:            PostgreSQL EDSL built on top of postgresql-simple
 -- description:
 homepage:            https://github.com/sopvop/postgresql-simple-dsl
@@ -18,11 +18,14 @@ cabal-version:       >=1.10
 library
   exposed-modules:
      Database.PostgreSQL.Simple.Dsl
-     Database.PostgreSQL.Simple.Dsl.Record
      Database.PostgreSQL.Simple.Dsl.Query
      Database.PostgreSQL.Simple.Dsl.Functions
      Database.PostgreSQL.Simple.Dsl.IntArray
      Database.PostgreSQL.Simple.Dsl.Internal
+     Database.PostgreSQL.Simple.Dsl.Internal.Types
+     Database.PostgreSQL.Simple.Dsl.Internal.Record
+     Database.PostgreSQL.Simple.Dsl.Lens
+     Database.PostgreSQL.Simple.Dsl.Rec
      Database.PostgreSQL.Simple.Dsl.Types
      Database.PostgreSQL.Simple.Dsl.Escaping
   other-modules:

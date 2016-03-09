@@ -2,13 +2,14 @@
 module Database.PostgreSQL.Simple.Dsl.IntArray
        where
 
-import           Prelude                                 hiding (concat)
+import Prelude hiding (concat)
 
-import           Data.ByteString.Builder                 (byteString, char8)
-import           Data.Monoid
+import Data.ByteString.Builder (byteString, char8)
+import Data.Monoid
 
-import           Database.PostgreSQL.Simple.Dsl.Internal
-import           Database.PostgreSQL.Simple.Types        (PGArray (..))
+import Database.PostgreSQL.Simple.Dsl.Internal
+import Database.PostgreSQL.Simple.Dsl.Types
+import Database.PostgreSQL.Simple.Types        (PGArray (..))
 
 data QueryInt
 

@@ -113,34 +113,23 @@ module Database.PostgreSQL.Simple.Dsl.Query
 --     , inner
 --     , on
      ) where
-import           Control.Applicative
-import           Control.Exception
-import           Control.Monad.State.Class
-import           Control.Monad.Trans.State               (runState)
-import           Data.Foldable                           (foldlM, toList)
+import Control.Monad.State.Class
+import Control.Monad.Trans.State (runState)
 
-import           Data.ByteString                         (ByteString)
-import           Data.ByteString.Builder                 (byteString, char8,
-                                                          toLazyByteString)
-import           Data.ByteString.Lazy                    (toStrict)
-import qualified Data.HashMap.Strict                     as HashMap
-import           Data.Int                                (Int64)
-import           Data.List                               (intersperse)
-import           Data.Maybe
-import           Data.Monoid
-import           Data.Text                               (Text)
-import qualified Data.Text.Encoding                      as T
-import qualified Database.PostgreSQL.LibPQ               as PQ
-import           Database.PostgreSQL.Simple              ((:.) (..), Connection,
-                                                          Only (..))
+import Data.ByteString            (ByteString)
+import Data.ByteString.Builder    (byteString, char8, toLazyByteString)
+import Data.ByteString.Lazy       (toStrict)
+import Data.Int                   (Int64)
+import Data.Monoid
+import Data.Text                  (Text)
+import Database.PostgreSQL.Simple ((:.) (..), Connection, Only (..))
 
 import qualified Database.PostgreSQL.Simple              as PG
 import           Database.PostgreSQL.Simple.Dsl.Escaping
 import           Database.PostgreSQL.Simple.Dsl.Internal
-import qualified Database.PostgreSQL.Simple.Internal     as PG
+import           Database.PostgreSQL.Simple.Dsl.Types
 import           Database.PostgreSQL.Simple.ToField
 import qualified Database.PostgreSQL.Simple.Types        as PG
-import           GHC.TypeLits                            (KnownSymbol)
 
 -- $use
 --
@@ -260,7 +249,7 @@ fromLateral :: (IsRecord a, IsQuery m) => Query a -> m a
 fromLateral = from . Lateral
 
 
-compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (ExprBuilder, a)
+compileValues  :: (HasNameSource m, IsRecord a) =>  [a] -> a -> m (RawExpr, a)
 compileValues vals renamed = do
   nm <- grabName
   let res = "(VALUES " <> body <> ") AS " <> namedRow nm renamed
@@ -610,42 +599,9 @@ groupBy e@(Expr _ b) = do
 having :: ExprA Bool -> Aggregator ()
 having (ExprA (Expr _ a)) = appendHaving a
 
-checkError :: PQ.Connection -> Maybe a -> IO a
-checkError _ (Just x) = return x
-checkError c Nothing  = PQ.errorMessage c >>= throwIO . PG.fatalError . fromMaybe "FatalError"
 
-escapeStringConn :: Connection -> ByteString -> IO ByteString
-escapeStringConn conn s =
-    PG.withConnection conn $ \c ->
-    PQ.escapeStringConn c s >>= checkError c
-
-escapeByteaConn :: Connection -> ByteString -> IO ByteString
-escapeByteaConn conn s =
-    PG.withConnection conn $ \c ->
-    PQ.escapeByteaConn c s >>= checkError c
-
-escapeIdentifier :: Connection -> ByteString -> IO ByteString
-escapeIdentifier conn s =
-    PG.withConnection conn $ \c ->
-    PQ.escapeIdentifier c s >>= checkError c
-
-buildQuery :: ExprBuilder -> ByteString
+buildQuery :: RawExpr -> ByteString
 buildQuery = toStrict . toLazyByteString
-{-
-cross :: (IsRecord a, IsRecord b) => From a -> From b -> From (a:.b)
-cross = crossJoin
--}
-on :: (( a-> b-> Expr Bool) -> From (a:.b)) -> (a -> b -> Expr Bool) -> From (a:.b)
-on f b = f b
-{-
-inner :: forall a b .(IsRecord a, IsRecord b) =>
-   From a -> From b -> (a -> b -> Expr Bool) -> From (a:.b)
-inner = innerJoin
--}
---infixr 3 `inner`
-infixl 2 `on`
-
---infixr 3 `cross`
 
 from' :: (IsQuery m, FromItem f a) => f -> (a -> m b) -> m b
 from' fi f = do
@@ -658,11 +614,6 @@ from' fi f = do
   return r
 
 {-# INLINE from' #-}
-
-exists' :: IsRecord a => Query a -> Expr a
-exists' mq = term $ " EXISTS (" <> body <> char8 ')'
-  where
-    body = compileQuery mq
 
 returning :: (t -> a) -> Update t -> Update a
 returning f (Update m) = Update $ do

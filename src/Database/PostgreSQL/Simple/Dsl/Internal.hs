@@ -1,69 +1,64 @@
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE BangPatterns               #-}
 {-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE DeriveFunctor              #-}
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE FunctionalDependencies     #-}
 {-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE PolyKinds                  #-}
+{-# LANGUAGE RankNTypes                 #-}
+{-# LANGUAGE RecordWildCards            #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE TypeOperators              #-}
-
+{-# LANGUAGE UndecidableInstances       #-}
 
 module Database.PostgreSQL.Simple.Dsl.Internal
        where
 
-import           Control.Applicative
-import           Control.Monad.State.Class
-import           Control.Monad.Trans.State            (State, evalState,
-                                                       runState)
-import           Control.Monad.Trans.Writer
-import           Data.Coerce
-import           Control.Monad.Identity
-import           Data.HashMap.Strict                  (HashMap)
-import qualified Data.HashMap.Strict                  as HashMap
-import           Data.List                            (intersperse)
-import           Data.Monoid
-import           Data.Proxy                           (Proxy (..))
-import           Data.Text                            (Text)
-import qualified Data.Text.Encoding                   as T
+import Control.Monad.Identity
+import Control.Monad.State.Class
+import Control.Monad.Trans.Reader (ReaderT, runReaderT)
+import Control.Monad.Trans.State  (State, evalState, execState, runState)
+import Control.Monad.Trans.Writer
 
-import           Data.ByteString.Builder (Builder, char8, intDec)
+import           Data.ByteString.Builder
+    (Builder, char8, lazyByteString, toLazyByteString)
+import qualified Data.ByteString.Lazy    as Lazy
 
-import           Database.PostgreSQL.Simple           ((:.) (..), Only (..))
-import           Database.PostgreSQL.Simple.FromField as PG hiding (Field)
-import           Database.PostgreSQL.Simple.FromRow   as PG
-import qualified Database.PostgreSQL.Simple.Types     as PG
-import           Database.PostgreSQL.Simple.ToField
+import Data.Coerce
+import Data.List   (intersperse)
+import Data.Monoid
 
-import           Database.PostgreSQL.Simple.Dsl.Types
-import           Database.PostgreSQL.Simple.Dsl.Escaping
+import           Data.Text          (Text)
+import qualified Data.Text.Encoding as T
+
+import           Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
 
 
-type ExprBuilder = Builder
+import Database.PostgreSQL.Simple         ((:.) (..), Only (..))
+import Database.PostgreSQL.Simple.FromRow as PG
+import Database.PostgreSQL.Simple.ToField
 
--- | Adds phantom type to RawExpr
-data Expr a = Expr {-# UNPACK #-} !Int ExprBuilder
+import Database.PostgreSQL.Simple.Dsl.Escaping
+import Database.PostgreSQL.Simple.Dsl.Lens
+import Database.PostgreSQL.Simple.Dsl.Types
 
-getRawExpr :: Expr t -> ExprBuilder
-getRawExpr (Expr _ b) = b
+type LazyByteString = Lazy.ByteString
 
-term :: ExprBuilder -> Expr a
+term :: RawExpr -> Expr a
 term = Expr 0
 
-parenPrec :: Bool -> ExprBuilder -> ExprBuilder
+parenPrec :: Bool -> RawExpr -> RawExpr
 parenPrec True bld = addParens bld
 parenPrec  _    bld = bld
 
-instance ToField (Expr a) where
-  toField (Expr _ a) = Plain a
 
-
-addParens :: ExprBuilder -> ExprBuilder
+addParens :: RawExpr -> RawExpr
 addParens t = char8 '(' <> t <> char8 ')'
 
 opt :: Monoid a => Maybe a -> a
@@ -75,11 +70,11 @@ fprepend p a = (p <>) <$> a
 fappend :: (Functor f, Monoid b) => f b -> b -> f b
 fappend a x = (<> x) <$> a
 
-rawField :: ToField a => a -> ExprBuilder
+rawField :: ToField a => a -> RawExpr
 rawField = escapeAction . toField
 
 
-binOp :: IsExpr expr => Int -> ExprBuilder -> expr a -> expr b -> expr c
+binOp :: IsExpr expr => Int -> RawExpr -> expr a -> expr b -> expr c
 binOp p op ea eb = fromExpr . Expr p $
    parenPrec (p < pa) a <> op <> parenPrec (p < pb) b
   where
@@ -87,60 +82,19 @@ binOp p op ea eb = fromExpr . Expr p $
     (Expr pb b) = toExpr eb
 {-# INLINE binOp #-}
 
-prefOp :: IsExpr expr => Int -> ExprBuilder -> expr a -> expr b
+prefOp :: IsExpr expr => Int -> RawExpr -> expr a -> expr b
 prefOp p op ea = fromExpr . Expr p $ op <> parenPrec (p < pa) a
   where
     (Expr pa a) = toExpr ea
 {-# INLINE prefOp #-}
 
-commaSep :: [ExprBuilder] -> ExprBuilder
+commaSep :: [RawExpr] -> RawExpr
 commaSep = mconcat . intersperse (char8 ',')
 
 -- | Source of uniques
 
-newtype NameSource = NameSource Int
-
-mkNameSource :: NameSource
-mkNameSource = NameSource 0
-
-instance Show NameSource where
-  show _ = "NameSource"
-
-class (Monad m) => HasNameSource m where
-  grabNS :: m NameSource
-  modifyNS :: (NameSource -> NameSource) -> m ()
-
-class IsRecord a where
-  asValues  :: a -> [ExprBuilder]
-  genNames :: HasNameSource m => Proxy a -> m a
-
 asRenamed :: forall a m . (IsRecord a, HasNameSource m) => a -> m a
-asRenamed _ = genNames (Proxy :: Proxy a)
-
--- | Parser for entities with columns
-data RecordParser a = RecordParser
-  { recordColumns   :: [ExprBuilder]
-  , recordRowParser :: RowParser a
-  }
-
-instance Functor RecordParser where
-  fmap f (RecordParser cs p) = RecordParser cs (fmap f p)
-
-instance Applicative RecordParser where
-  pure =  RecordParser [] . pure
-  RecordParser cf f <*> RecordParser ca a = RecordParser (cf <> ca) (f <*> a)
-
-recField :: FromField a => Expr a -> RecordParser a
-recField (Expr _ e) = RecordParser [e] field
-
-takeField :: FromField a => Expr a -> RecordParser a
-takeField = recField
-
-class FromRecord a b where
-  fromRecord :: a -> RecordParser b
-
-newtype Nullable a = Nullable { getNullable :: a }
-        deriving (Eq, Ord, Functor)
+asRenamed _ = genNames
 
 
 justNullable :: Nullable a -> a
@@ -148,10 +102,6 @@ justNullable = getNullable
 
 fromNullable :: NulledRecord a b => Nullable a -> b
 fromNullable = nulled . getNullable
-
-type family Nulled a where
-  Nulled (Maybe a) = Maybe a
-  Nulled b = Maybe b
 
 class NulledRecord a b | a -> b where
   nulled :: a -> b
@@ -175,102 +125,6 @@ instance (NulledRecord a na , NulledRecord b nb)
   nulled (a :. b) = nulled a :. nulled b
   {-# INLINE nulled #-}
 
-instance NulledRecord (PGRecord '[]) (PGRecord '[]) where
-  nulled = id
-
-instance forall a av nv bs nbs . (nv ~ Nulled av, NulledRecord (PGRecord bs) (PGRecord nbs))
-  =>  NulledRecord (PGRecord (a :-> Expr av ': bs)) (PGRecord ( a :-> Expr nv ': nbs)) where
-  nulled (a :& bs) = Proxy =: coerce a <+> nulled bs
-
-
-instance (FromRecord a b) => FromRecord (Nullable a) (Maybe b) where
-  fromRecord r = nullableParser parser
-    where
-      parser = fromRecord (getNullable r) :: RecordParser b
-
-nullableParser :: RecordParser a -> RecordParser (Maybe a)
-nullableParser parser = RecordParser cols (pure Nothing <* replicateM_ (length cols) fnull
-                                    <|> fmap Just rowP )
-  where
-    RecordParser cols rowP = parser
-    fnull :: RowParser PG.Null
-    fnull =  PG.field
-
-instance IsRecord (Expr a) where
-  asValues (Expr _ a) = [a]
-  genNames _ =  newExpr
-
-instance (FromField a) => FromRecord (Expr a) a where
-  fromRecord (Expr p e) = recField $ Expr p e
-
-instance IsRecord (Expr a, Expr b) where
-  asValues (Expr _ a, Expr _ b) = [a,b]
-  genNames _ =  (,) <$> newExpr <*> newExpr
-
-instance (FromField a, FromField b) => FromRecord (Expr a, Expr b) (a,b) where
-  fromRecord (a,b) = (,) <$> recField a <*> recField b
-
-instance IsRecord (Expr a, Expr b, Expr c) where
-  asValues (Expr _ a, Expr _ b, Expr _ c) = [a,b,c]
-  genNames _ =  (,,) <$> newExpr <*> newExpr
-                     <*> newExpr
-
-instance (FromField a, FromField b, FromField c) =>
-         FromRecord (Expr a, Expr b, Expr c) (a,b,c) where
-  fromRecord (a,b,c) = (,,) <$> recField a <*> recField b <*> recField c
-
-instance IsRecord (Expr a, Expr b, Expr c, Expr d) where
-  asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d) = [a,b,c,d]
-  genNames _ =  (,,,) <$> newExpr <*> newExpr
-                      <*> newExpr <*> newExpr
-
-instance (FromField a, FromField b, FromField c, FromField d) =>
-         FromRecord (Expr a, Expr b, Expr c, Expr d) (a,b,c,d) where
-  fromRecord (a,b,c,d) = (,,,) <$> recField a <*> recField b <*> recField c <*> recField d
-
-instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e) where
-  asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d, Expr _ e) = [a,b,c,d,e]
-  genNames _ =  (,,,,) <$> newExpr <*> newExpr
-                       <*> newExpr <*> newExpr
-                       <*> newExpr
-
-instance (FromField a, FromField b, FromField c, FromField d, FromField e) =>
-         FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e) (a,b,c,d, e) where
-  fromRecord (a,b,c,d,e) = (,,,,) <$> recField a <*> recField b <*> recField c
-                                  <*> recField d <*> recField e
-
-instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) where
-  asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d, Expr _ e, Expr _ f) = [a,b,c,d,e,f]
-  genNames _ =  (,,,,,) <$> newExpr <*> newExpr
-                        <*> newExpr <*> newExpr
-                        <*> newExpr <*> newExpr
-
-instance (FromField a, FromField b, FromField c, FromField d, FromField e, FromField f) =>
-         FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f) (a,b,c,d,e, f) where
-  fromRecord (a,b,c,d,e,f) = (,,,,,) <$> recField a <*> recField b <*> recField c
-                                     <*> recField d <*> recField e <*> recField f
-
-instance IsRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g) where
-  asValues (Expr _ a, Expr _ b, Expr _ c, Expr _ d, Expr _ e, Expr _ f, Expr _ g) = [a,b,c,d,e,f,g]
-  genNames _ = (,,,,,,) <$> newExpr <*> newExpr
-                        <*> newExpr <*> newExpr
-                        <*> newExpr <*> newExpr
-                        <*> newExpr
-
-instance (FromField a, FromField b, FromField c, FromField d
-         , FromField e, FromField f, FromField g) =>
-         FromRecord (Expr a, Expr b, Expr c, Expr d, Expr e, Expr f, Expr g)
-         (a,b,c,d,e,f,g) where
-  fromRecord (a,b,c,d,e,f,g) = (,,,,,,) <$> recField a <*> recField b <*> recField c
-                                       <*> recField d <*> recField e <*> recField f
-                                       <*> recField g
-
-instance (IsRecord a, IsRecord b) => IsRecord (a:.b) where
-  asValues (a:.b) = asValues a ++ asValues b
-  genNames _ = pure (:.) `ap` genNames Proxy `ap` genNames Proxy
-
-instance (FromRecord a a', FromRecord b b') => FromRecord (a :. b) (a':.b') where
-  fromRecord (a:.b) = (:.) <$> fromRecord a <*> fromRecord b
 
 class ToRecord a where
   type AsRecord a :: *
@@ -374,14 +228,14 @@ instance IsAggregate (ExprA a, ExprA b, ExprA c, ExprA d, ExprA e, ExprA f, Expr
 data Distinct = DistinctAll | Distinct | DistinctOn Sorting
 
 data QueryState t = QueryState
-  { queryStateWith      :: Maybe ExprBuilder
+  { queryStateWith      :: Maybe RawExpr
   , queryStateDistinct  :: Distinct
   , queryStateRecursive :: Any
-  , queryStateFrom      :: Maybe ExprBuilder
-  , queryStateWhere     :: Maybe ExprBuilder
+  , queryStateFrom      :: Maybe RawExpr
+  , queryStateWhere     :: Maybe RawExpr
   , queryStateOrder     :: Maybe Sorting
-  , queryStateGroupBy   :: Maybe ExprBuilder
-  , queryStateHaving    :: Maybe ExprBuilder
+  , queryStateGroupBy   :: Maybe RawExpr
+  , queryStateHaving    :: Maybe RawExpr
   , queryStateLimit     :: Maybe Int
   , queryStateOffset    :: Maybe Int
   , queryAction         :: t
@@ -401,17 +255,6 @@ instance HasNameSource (QueryM t) where
   {-# INLINE grabNS #-}
   {-# INLINE modifyNS #-}
 
-grabName :: HasNameSource m => m Builder
-grabName = do
-  NameSource n <- grabNS
-  modifyNS . const . NameSource $ succ n
-  return $ char8 'q' <> intDec n
-
-{-# INLINE grabName #-}
-
-newExpr :: HasNameSource m => m (Expr a)
-newExpr = liftM term  $ grabName
-{-# INLINE newExpr #-}
 
 newtype QueryM t a = QueryM { runQuery :: State (QueryState t) a }
         deriving (Functor, Monad, Applicative, MonadState (QueryState t))
@@ -419,9 +262,9 @@ newtype QueryM t a = QueryM { runQuery :: State (QueryState t) a }
 type Query a = QueryM () a
 
 class (HasNameSource m, Monad m) => IsQuery m where
-  modifyWith :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
-  modifyFrom :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
-  modifyWhere :: (Maybe ExprBuilder -> Maybe ExprBuilder) -> m ()
+  modifyWith :: (Maybe RawExpr -> Maybe RawExpr) -> m ()
+  modifyFrom :: (Maybe RawExpr -> Maybe RawExpr) -> m ()
+  modifyWhere :: (Maybe RawExpr -> Maybe RawExpr) -> m ()
   modifyNameSource :: (NameSource -> NameSource) -> m ()
   getNameSource :: m NameSource
 
@@ -476,18 +319,18 @@ modifyRecursive f = do
   put $ st { queryStateRecursive = Any $ f (getAny $ queryStateRecursive st ) }
 {-# INLINE modifyRecursive #-}
 
-appendWith :: IsQuery m => ExprBuilder -> m ()
+appendWith :: IsQuery m => RawExpr -> m ()
 appendWith act = modifyWith $ \w ->
   (w `fappend` ",\n") <> Just act
 
 {-# INLINE appendWith #-}
 
-appendFrom :: IsQuery m => ExprBuilder -> m ()
+appendFrom :: IsQuery m => RawExpr -> m ()
 appendFrom f = modifyFrom $ \frm ->
   (frm `fappend` ",\n") <> Just f
 {-# INLINE appendFrom #-}
 
-appendWhere :: IsQuery m => ExprBuilder -> m ()
+appendWhere :: IsQuery m => RawExpr -> m ()
 appendWhere w = modifyWhere $ \wh ->
   (wh `fappend` " AND ") <> Just w
 {-# INLINE appendWhere #-}
@@ -512,18 +355,18 @@ compIt (QueryM a) = do
 newtype Aggregator a = Aggregator { runAggregator :: Query a }
         deriving (Functor, Applicative, Monad, HasNameSource)
 
-appendHaving :: ExprBuilder -> Aggregator ()
+appendHaving :: RawExpr -> Aggregator ()
 appendHaving e = Aggregator . modify $ \st ->
       st { queryStateHaving = (queryStateHaving st `fappend` " AND ") <> Just e }
 {-# INLINE appendHaving #-}
 
-appendGroupBy :: ExprBuilder -> Aggregator ()
+appendGroupBy :: RawExpr -> Aggregator ()
 appendGroupBy e = Aggregator . modify $ \st ->
    st { queryStateGroupBy = (queryStateGroupBy st `fappend` char8 ',') <> Just e }
 
 {-# INLINE appendGroupBy #-}
 
-finishIt :: [ExprBuilder] -> QueryState t -> ExprBuilder
+finishIt :: [RawExpr] -> QueryState t -> RawExpr
 finishIt expr QueryState{..} = execWriter $ do
   forM_ queryStateWith $ \w -> tell (withStart <> w)
   tell $ ("\nSELECT ")
@@ -544,7 +387,7 @@ finishIt expr QueryState{..} = execWriter $ do
     distinct d = case d of
       DistinctAll -> mempty
       Distinct -> "DISTINCT "
-      DistinctOn (Sorting e) -> "DISTINCT ON (" <> (mconcat $ intersperse "," $ map fst e) 
+      DistinctOn (Sorting e) -> "DISTINCT ON (" <> (mconcat $ intersperse "," $ map fst e)
                  <>  ") "
     distinctOrder = case queryStateDistinct of
         DistinctOn es -> Just es
@@ -554,7 +397,7 @@ finishIt expr QueryState{..} = execWriter $ do
     withStart = if getAny queryStateRecursive then "\nWITH RECURSIVE "
                  else "\nWITH "
 
-compileQuery :: forall a t . (IsRecord a, Monoid t) => QueryM t a -> ExprBuilder
+compileQuery :: forall a t . (IsRecord a, Monoid t) => QueryM t a -> RawExpr
 compileQuery q = evalState comp (emptyQuery :: QueryState t)
  where
    comp = runQuery $ do
@@ -562,13 +405,6 @@ compileQuery q = evalState comp (emptyQuery :: QueryState t)
      return $ finishIt (asValues r) q'
 
 data Table a = Table !Text
-
--- | class for things which can be used in FROM clause
-class FromItem f a | f -> a where
-   fromItem :: f -> From a
-
-instance FromItem (From a) a where
-   fromItem = id
 
 instance (IsRecord a) => FromItem (Query a) a where
   fromItem mq = From $ do
@@ -580,9 +416,7 @@ instance (IsRecord a) => FromItem (Query a) a where
      return $ (bld, renamed)
 
 
-newtype From a = From { runFrom :: State NameSource (ExprBuilder, a) }
-
-namedRow :: IsRecord a => ExprBuilder -> a -> ExprBuilder
+namedRow :: IsRecord a => RawExpr -> a -> RawExpr
 namedRow nm r = nm <> char8 '(' <> commaSep (asValues r) <> char8 ')'
 
 newtype Lateral a = Lateral (Query a)
@@ -596,33 +430,21 @@ instance (IsRecord a) => FromItem (Lateral a) a where
                <> namedRow nm renamed
      return $ (bld, renamed)
 
-instance RecExpr (Rec a) => FromItem (Function (Rec a)) (Rec a) where
-  fromItem (Function nm args) = From $ do
-    alias <- grabName --Alias bs nameBld
-    let r = mkRecExpr (alias <> char8 '.') (undefined :: PGRecord a)
-    pure (escapeIdent nm <> char8 '(' <> commaSep args <> ") AS " <> alias, r)
-
-instance HasNameSource (State NameSource) where
-  grabNS = get
-  modifyNS f = modify f
-  {-# INLINE grabNS #-}
-  {-# INLINE modifyNS #-}
-
-finishQuery :: (a -> RecordParser b) -> Query a -> (ExprBuilder, RowParser b)
+finishQuery :: (a -> RecordParser b) -> Query a -> (RawExpr, RowParser b)
 finishQuery fromRec mq = evalState finisher $ (emptyQuery :: QueryState ())
   where
     finisher = runQuery $ do (r,q') <- compIt mq
                              let RecordParser cols parser = fromRec r
                              return (finishIt cols q', parser)
 
-finishQueryNoRet :: Query t -> ExprBuilder
+finishQueryNoRet :: Query t -> RawExpr
 finishQueryNoRet mq = evalState finisher (emptyQuery :: QueryState ())
   where
     finisher = runQuery $ do
       (_, q') <- compIt mq
       return $ finishIt ["true"] q'
 
-newtype Sorting = Sorting [(ExprBuilder, ExprBuilder)]
+newtype Sorting = Sorting [(RawExpr, RawExpr)]
   deriving (Monoid)
 
 sortingEmpty :: Sorting -> Bool
@@ -630,47 +452,46 @@ sortingEmpty (Sorting []) = True
 sortingEmpty _ = False
 {-# INLINE sortingEmpty #-}
 
-compileSorting :: Sorting -> ExprBuilder
+compileSorting :: Sorting -> RawExpr
 compileSorting (Sorting r) = mconcat . intersperse (char8 ',')
                . map (\(expr, order) -> (expr <> order)) $ r
 {-# INLINE compileSorting #-}
 
-newtype UpdExpr a = UpdExpr { getUpdates :: HashMap Text ExprBuilder }
+newtype UpdExpr a = UpdExpr { getUpdates :: HashMap LazyByteString RawExpr }
 
 instance Monoid (UpdExpr a) where
   mempty = UpdExpr mempty
   UpdExpr a `mappend` UpdExpr b = UpdExpr (a<>b)
 
-newtype Update a = Update { runUpdate :: QueryM (ExprBuilder) a }
+newtype Update a = Update { runUpdate :: QueryM (RawExpr) a }
    deriving (Functor, Applicative, Monad, HasNameSource)
 
-
-newtype Inserting r a = Inserting { runInserting :: QueryM (HashMap Text ExprBuilder) a }
+newtype Inserting r a = Inserting { runInserting :: QueryM (HashMap LazyByteString RawExpr) a }
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
-compileInserting :: ExprBuilder -> QueryState [(Text, ExprBuilder)] -> Update ()
+compileInserting :: RawExpr -> QueryState [(LazyByteString, RawExpr)] -> Update ()
 compileInserting table q = Update $ do
   let (cols, exprs) = unzip $ queryAction q
       withPart = queryStateWith q
       compiledSel = finishIt exprs $ q { queryStateWith = mempty }
       res = opt ("\nWITH " `fprepend` withPart)
             <> "\nINSERT INTO " <> table <> char8 '('
-            <> (commaSep (map escapeIdent cols) <> ") (")
+            <> (commaSep (map lazyByteString cols) <> ") (")
             <> (compiledSel <> ")")
   modify $ \st -> st { queryAction = res }
 
-finishInserting :: ExprBuilder -> QueryState (HashMap Text ExprBuilder) -> ExprBuilder
+finishInserting :: RawExpr -> QueryState (HashMap LazyByteString RawExpr) -> RawExpr
 finishInserting table q@QueryState{..} =
     opt ("\nWITH " `fprepend` queryStateWith)
       <> "\nINSERT INTO " <> table <> char8 '('
-      <> (commaSep (map escapeIdent columns) <> ") (")
+      <> (commaSep (map lazyByteString columns) <> ") (")
       <> (compiledSel <> ")")
   where
     compiledSel = finishIt exprs $ q { queryStateWith = mempty }
     (columns, exprs) = unzip $ HashMap.toList queryAction
 
-compileInserting' :: ExprBuilder -> Inserting t a -> QueryM ExprBuilder a
+compileInserting' :: RawExpr -> Inserting t a -> QueryM RawExpr a
 compileInserting' table (Inserting a) = do
   (r, q) <- compIt a
   let res = finishInserting table q
@@ -678,30 +499,30 @@ compileInserting' table (Inserting a) = do
   return r
 
 
-finishUpdate :: (a -> RecordParser b) -> Update a -> (ExprBuilder, RowParser b)
+finishUpdate :: (a -> RecordParser b) -> Update a -> (RawExpr, RowParser b)
 finishUpdate recParser (Update (QueryM u)) = (result, parser)
   where
     (expr, bld) = runState u emptyQuery
     RecordParser cols parser = recParser expr
     result = queryAction bld <> "\nRETURNING " <> commaSep cols
 
-compileUpdate :: (IsRecord t) => Update t -> ExprBuilder
+compileUpdate :: (IsRecord t) => Update t -> RawExpr
 compileUpdate (Update (QueryM u)) =
     queryAction bld <> "\nRETURNING " <> commaSep (asValues expr)
   where
     (expr, bld) = runState u emptyQuery
 
-finishUpdateNoRet :: Update t -> ExprBuilder
+finishUpdateNoRet :: Update t -> RawExpr
 finishUpdateNoRet (Update (QueryM u)) = finish $ runState u emptyQuery
   where
     finish (_, bld) = queryAction bld
 
 
-newtype Updating r a = Updating { runUpdating :: QueryM (HashMap Text ExprBuilder) a }
+newtype Updating r a = Updating { runUpdating :: QueryM (HashMap LazyByteString RawExpr) a }
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 
-finishUpdating :: ExprBuilder -> QueryState (HashMap Text ExprBuilder) -> ExprBuilder
+finishUpdating :: RawExpr -> QueryState (HashMap LazyByteString RawExpr) -> RawExpr
 finishUpdating table QueryState{..} =
          opt ("\nWITH " `fprepend` queryStateWith)
          <> "\nUPDATE " <> table <> "\nSET "
@@ -710,11 +531,11 @@ finishUpdating table QueryState{..} =
          <> opt ("\nWHERE " `fprepend` queryStateWhere)
   where
     (columns, exprs) = unzip $ HashMap.toList queryAction
-    sets = char8 '(' <> commaSep (map escapeIdent columns)
+    sets = char8 '(' <> commaSep (map lazyByteString columns)
          <> ")=(" <> commaSep exprs <> char8 ')'
 
 
-compileDeleting :: ExprBuilder -> Deleting t b -> Update b
+compileDeleting :: RawExpr -> Deleting t b -> Update b
 compileDeleting table (Deleting del) = Update $ do
    (r, q) <- compIt del
    let bld = opt ("\nWITH " `fprepend` queryStateWith q)
@@ -725,7 +546,7 @@ compileDeleting table (Deleting del) = Update $ do
    return r
 
 
-compileUpdating :: ExprBuilder -> Updating t a -> QueryM ExprBuilder a
+compileUpdating :: RawExpr -> Updating t a -> QueryM RawExpr a
 compileUpdating table (Updating a) = do
   (r, q) <- compIt a
   let res = finishUpdating table q
@@ -736,7 +557,7 @@ newtype Deleting t a = Deleting { runDeleting :: QueryM () a }
    deriving (Functor, Applicative, Monad, IsQuery, HasNameSource)
 
 data Function a = Function { functionName :: Text
-                           , functionArgs :: [ExprBuilder]
+                           , functionArgs :: [RawExpr]
                            }
 
 arg :: Expr t -> Function a -> Function a
@@ -760,67 +581,22 @@ data Union = UnionDistinct | UnionAll deriving (Eq, Show, Ord)
 
 data Recursive a = Recursive Union (Query a) (From a -> Query a)
 
-instance IsRecord (PGRecord ((t :-> Expr a) ': '[])) where
-  asValues (a :& _) = [getRawExpr $ getCol a]
-  genNames _ = do
-    n <- newExpr
-    pure $ Proxy =: n
 
-instance (IsRecord (PGRecord (b ': c))) =>
-         IsRecord (PGRecord (t :-> Expr a ': b ': c)) where
-  asValues (a :& as) = getRawExpr (getCol a) : asValues as
-  genNames _ = do
-    n <- newExpr
-    res <- genNames (Proxy :: Proxy (PGRecord (b ': c)))
-    pure $ Proxy =: n <+> res
-
-instance FromField a => FromRecord (PGRecord '[t :-> Expr a]) (PGRecord '[ t :-> a]) where
-  fromRecord (r :& _) = (Proxy =:) <$> recField (getCol r)
-
-instance (FromRecord (PGRecord (b ': c)) (PGRecord (b' ': c')), FromField a) =>
-   FromRecord (PGRecord (t :-> Expr a ': (b ': c)))
-   (PGRecord ( t :-> a ': (b' ': c'))) where
-  fromRecord (a :& as) = (\a' b' -> Proxy =: a' <+> b') <$> recField (getCol a)
-                                                        <*> fromRecord as
-
-class RecExpr a where
-  mkRecExpr :: ExprBuilder -> a -> a
-
-instance NamesColumn t => RecExpr (PGRecord '[t :-> Expr a ]) where
-  mkRecExpr b _ = Proxy =: (Expr 0 nm)
-    where nm = b <> escapeAction (toField $ columnName (Proxy :: Proxy t))
-
-instance (NamesColumn t, RecExpr (PGRecord (x ': xs)))
-         => RecExpr (PGRecord (t :-> Expr a ': x ': xs )) where
-  mkRecExpr b _ = Proxy =: (Expr 0 nm)
-                `rappend` mkRecExpr b (undefined :: PGRecord ( x ': xs))
-    where nm = b <> escapeAction (toField $ columnName (Proxy :: Proxy t))
-
-instance forall a r. (RecExpr (PGRecord a), r~(PGRecord a)) =>
-         FromItem (Table (PGRecord a)) (PGRecord a) where
-  fromItem (Table nm) = From $ do
-    let bs = T.encodeUtf8 nm
-        nameBld = escapeIdentifier bs
-    alias <- grabName --Alias bs nameBld
-    let r = mkRecExpr (alias <> char8 '.') (undefined :: PGRecord a)
-        q = nameBld <> " AS " <> alias
-    return $ (q, r)
-
-
-update :: forall a b . RecExpr a => Table a -> (a -> Updating a b) -> Update b
+update :: forall a b . ToColumns a => Table a -> (a -> Updating a b) -> Update b
 update (Table nm) f = Update $ do
   alias <- grabName
-  let r = mkRecExpr (alias <> char8 '.') (undefined :: a)
+  let r = toColumns (alias <> char8 '.')
       q = nameBld <> " AS " <> alias
       upd = f r
   compileUpdating q upd
   where
       nameBld = escapeIdentifier $ T.encodeUtf8 nm
 
-delete :: forall a  b . RecExpr a => Table a -> (a -> Deleting a b) -> Update b
+
+delete :: forall a  b . ToColumns a => Table a -> (a -> Deleting a b) -> Update b
 delete (Table nm) f = do
   alias <- grabName
-  let r = mkRecExpr (alias <> char8 '.') (undefined :: a)
+  let r = toColumns (alias <> char8 '.')
       q = nameBld <> " AS " <> alias
       upd = f r
   compileDeleting q upd
@@ -828,17 +604,60 @@ delete (Table nm) f = do
      nameBld = escapeIdentifier $ T.encodeUtf8 nm
 
 
-insert :: forall a . RecExpr a => Table a -> Query (UpdExpr a) -> Update a
+insert :: forall a . ToColumns a => Table a -> Query (UpdExpr a) -> Update a
 insert (Table nm) mq = do
-  let r = mkRecExpr mempty (undefined :: a)
+  let r = toColumns mempty
   (UpdExpr upd, q) <- compIt mq
   compileInserting (escapeIdent nm) $ q {queryAction = HashMap.toList upd}
   return r
 
-insert' :: forall a b . RecExpr a => Table a -> Inserting a b -> Update a
+insert' :: forall a b . ToColumns a => Table a -> Inserting a b -> Update a
 insert' (Table nm) upd = Update $ do
-  let r = mkRecExpr mempty (undefined :: a)
+  let r = toColumns mempty
   _ <- compileInserting' nameBld upd
   return r
   where
       nameBld = escapeIdentifier $ T.encodeUtf8 nm
+
+
+
+
+newtype UpdaterM t a = UpdaterM (ReaderT t (State (HashMap.HashMap Lazy.ByteString RawExpr)) a)
+
+instance Functor (UpdaterM t) where
+  fmap f (UpdaterM !a) = UpdaterM $! (fmap f a)
+
+instance Applicative (UpdaterM t) where
+  pure = UpdaterM . pure
+  UpdaterM f <*> UpdaterM v = UpdaterM $! f <*> v
+
+instance Monad (UpdaterM t) where
+  return = pure
+  UpdaterM mv >>= mf = UpdaterM $ do
+    v <- mv
+    let UpdaterM f = mf v
+    f
+
+type Updater t = UpdaterM t ()
+
+
+mkUpdate :: ToColumns a => Updater a -> UpdExpr a
+mkUpdate (UpdaterM u) = UpdExpr (execState (runReaderT u table ) mempty)
+  where
+    table = toColumns mempty
+
+
+setField :: Lens' s (Expr a) -> Expr a -> Updater s
+setField l (Expr _ a) = UpdaterM $ do
+   Expr _ nm <- views l
+   modify $ HashMap.insert (toLazyByteString nm) a
+
+setFieldVal :: ToField a => Lens' s (Expr a) -> a -> Updater s
+setFieldVal l a = setField l (term $ rawField a)
+
+infixr 7 =., =.!
+(=.) :: Lens' s (Expr a) -> Expr a -> Updater s
+(=.) = setField
+
+(=.!) :: ToField a => Lens' s (Expr a) -> a -> Updater s
+(=.!) = setFieldVal
