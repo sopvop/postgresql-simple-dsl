@@ -34,7 +34,7 @@ import Data.List   (intersperse)
 import Data.Monoid
 
 import           Data.Text          (Text)
-import qualified Data.Text.Encoding as T
+import qualified Data.Text.Encoding as Text
 
 import           Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
@@ -76,7 +76,7 @@ rawField = escapeAction . toField
 
 binOp :: IsExpr expr => Int -> RawExpr -> expr a -> expr b -> expr c
 binOp p op ea eb = fromExpr . Expr p $
-   parenPrec (p < pa) a <> op <> parenPrec (p < pb) b
+   parenPrec (p <= pa) a <> op <> parenPrec (p < pb) b
   where
     (Expr pa a) = toExpr ea
     (Expr pb b) = toExpr eb
@@ -404,7 +404,11 @@ compileQuery q = evalState comp (emptyQuery :: QueryState t)
      (r,q') <- compIt q
      return $ finishIt (asValues r) q'
 
-data Table a = Table !Text
+instance ToColumns a => FromItem (Function a) a where
+  fromItem (Function nm args) = From $ do
+     alias <- grabName --Alias bs nameBld
+     let r = toColumns (alias <> char8 '.')
+     pure (escapeIdent nm <> char8 '(' <> commaSep args <> ") AS " <> alias, r)
 
 instance (IsRecord a) => FromItem (Query a) a where
   fromItem mq = From $ do
@@ -414,6 +418,17 @@ instance (IsRecord a) => FromItem (Query a) a where
      let bld = char8 '(' <> finishIt (asValues r) q <> ") AS "
                <> namedRow nm renamed
      return $ (bld, renamed)
+
+data Table a = Table !Text
+
+instance ToColumns a => FromItem (Table a) a where
+   fromItem (Table nm) = From $ do
+      alias <- grabName
+      let
+        bld = escapeIdentifier $ Text.encodeUtf8 nm
+        r = toColumns (alias <> char8 '.')
+        q = bld <> " AS " <> alias
+      pure (q, r)
 
 
 namedRow :: IsRecord a => RawExpr -> a -> RawExpr
@@ -567,7 +582,7 @@ function :: Text -> Function a
 function bs = Function bs []
 
 escapeIdent :: Text -> Builder
-escapeIdent = escapeIdentifier . T.encodeUtf8
+escapeIdent = escapeIdentifier . Text.encodeUtf8
 
 call :: Function a -> Expr a
 call (Function bs args) = Expr 10 $
@@ -590,7 +605,7 @@ update (Table nm) f = Update $ do
       upd = f r
   compileUpdating q upd
   where
-      nameBld = escapeIdentifier $ T.encodeUtf8 nm
+      nameBld = escapeIdentifier $ Text.encodeUtf8 nm
 
 
 delete :: forall a  b . ToColumns a => Table a -> (a -> Deleting a b) -> Update b
@@ -601,7 +616,7 @@ delete (Table nm) f = do
       upd = f r
   compileDeleting q upd
   where
-     nameBld = escapeIdentifier $ T.encodeUtf8 nm
+     nameBld = escapeIdentifier $ Text.encodeUtf8 nm
 
 
 insert :: forall a . ToColumns a => Table a -> Query (UpdExpr a) -> Update a
@@ -617,7 +632,7 @@ insert' (Table nm) upd = Update $ do
   _ <- compileInserting' nameBld upd
   return r
   where
-      nameBld = escapeIdentifier $ T.encodeUtf8 nm
+      nameBld = escapeIdentifier $ Text.encodeUtf8 nm
 
 
 

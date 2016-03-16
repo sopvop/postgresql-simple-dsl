@@ -70,6 +70,10 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , Update
      , update
      , setFields
+     , setField
+     , setFieldVal
+     , mkUpdate
+     , Updater
      , UpdExpr
      , Updating
      , delete
@@ -108,10 +112,6 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , having
      , groupBy
      , from'
---     , with'
---     , cross
---     , inner
---     , on
      ) where
 import Control.Monad.State.Class
 import Control.Monad.Trans.State (runState)

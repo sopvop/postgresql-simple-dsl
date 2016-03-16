@@ -91,9 +91,9 @@ class GIsRecord f where
   gGenNames :: HasNameSource m => m (f a)
   gAsValues :: f a -> [RawExpr]
 
-instance GIsRecord (S1 s (K1 i (Expr a))) where
-  gGenNames = M1 . K1 <$> newExpr
-  gAsValues (M1 (K1 v)) = [rawExpr v]
+instance IsRecord a => GIsRecord (S1 s (K1 i a)) where
+  gGenNames = M1 . K1 <$> genNames
+  gAsValues (M1 (K1 v)) = asValues v
 
 instance (GIsRecord a , GIsRecord b ) => GIsRecord (a :*: b) where
   gGenNames = (:*:) <$> gGenNames <*> gGenNames

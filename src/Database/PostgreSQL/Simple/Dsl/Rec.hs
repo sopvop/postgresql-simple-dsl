@@ -21,7 +21,7 @@ module Database.PostgreSQL.Simple.Dsl.Rec
   , (=:)
   , (=::)
   , (<+>)
-  , (.>)
+--  , (.>)
   , (?>)
   , (.?>)
   , (:::)
@@ -30,6 +30,14 @@ module Database.PostgreSQL.Simple.Dsl.Rec
   , Proxy(..)
   , RLens
   , (:->)(..)
+  , RElem (..)
+  , RIndex (..)
+  , RImage (..)
+  , RSubset(..)
+  , (++) (..)
+  , ELens
+  , elens
+  , lcol
   ) where
 
 
@@ -50,6 +58,7 @@ import Database.PostgreSQL.Simple.Types (QualifiedIdentifier (..))
 import Database.PostgreSQL.Simple.Dsl.Escaping
 import Database.PostgreSQL.Simple.Dsl.Internal
 import Database.PostgreSQL.Simple.Dsl.Types
+import Database.PostgreSQL.Simple.Dsl.Lens
 import Database.PostgreSQL.Simple.FromField    (FromField (..))
 
 
@@ -206,15 +215,24 @@ instance (RElem r ss i , RSubset rs ss is) => RSubset (r ': rs) ss (i ': is) whe
 
 type ISubset rs ss = RSubset rs ss (RImage rs ss)
 
+lcol :: Functor f => (a -> f a) -> (t :-> a) -> f (t :-> a)
+lcol f (Col v) = (\c -> Col c) <$> f v
 
+elens :: (Functor f, IElem (t :-> a) rs)
+      => sing (t :-> a)
+      -> (a -> f a)
+      -> Rec rs
+      -> f (Rec rs)
+elens proxy = rlens proxy . lcol
 
+type ELens t a rs = forall f . (IElem (t :-> a) rs, Functor f) => (a -> f a) -> Rec rs -> f (Rec rs)
 type RLens e rs = forall f . (IElem e rs, Functor f) => (e -> f e) -> Rec rs -> f (Rec rs)
-
+{-
 view :: ((a -> Const a a) -> s -> Const a s) -> s -> a
 view l = getConst . l Const
-
+-}
 --(.>) :: IElem '(t, c) rs => FieldRec rs -> SField '(t, c) -> c
-(.>) :: (IElem (t :-> v) rs) =>  Rec rs -> RLens (t :-> v) rs -> v
+(.>) :: (IElem (t :-> v) rs) =>  Rec rs -> Lens' (Rec rs) (t :-> v) -> v
 r .> f = getCol (view f r)
 
 infixl 8 .>
@@ -272,9 +290,6 @@ instance (FromRecord (PGRecord (b ': c)) (PGRecord (b' ': c')), FromField a) =>
   fromRecord (a :& as) = (\a' b' -> Proxy =: a' <+> b') <$> recField (getCol a)
                                                         <*> fromRecord as
 
-class RecExpr a where
-  mkRecExpr :: RawExpr -> a -> a
-
 instance KnownSymbol t => ToColumns (PGRecord '[t :-> Expr a ]) where
   toColumns b = Proxy =: (Expr 0 nm)
     where
@@ -287,59 +302,3 @@ instance (KnownSymbol t, ToColumns (PGRecord (x ': xs)))
     where
      nm = b <> (escapeIdentifier . T.encodeUtf8 . T.pack $ symbolVal (Proxy :: Proxy t))
 
-instance forall a r. (RecExpr (PGRecord a), r~(PGRecord a)) =>
-         FromItem (Table (PGRecord a)) (PGRecord a) where
-  fromItem (Table nm) = From $ do
-    let bs = T.encodeUtf8 nm
-        nameBld = escapeIdentifier bs
-    alias <- grabName --Alias bs nameBld
-    let r = mkRecExpr (alias <> char8 '.') (undefined :: PGRecord a)
-        q = nameBld <> " AS " <> alias
-    return $ (q, r)
-
-
-instance RecExpr (Rec a) => FromItem (Function (Rec a)) (Rec a) where
-  fromItem (Function nm args) = From $ do
-    alias <- grabName --Alias bs nameBld
-    let r = mkRecExpr (alias <> char8 '.') (undefined :: PGRecord a)
-    pure (escapeIdent nm <> char8 '(' <> commaSep args <> ") AS " <> alias, r)
-
-
-
-{-
-update :: forall a b . RecExpr a => Table a -> (a -> Updating a b) -> Update b
-update (Table nm) f = Update $ do
-  alias <- grabName
-  let r = mkRecExpr (alias <> char8 '.') (undefined :: a)
-      q = nameBld <> " AS " <> alias
-      upd = f r
-  compileUpdating q upd
-  where
-      nameBld = escapeIdentifier $ T.encodeUtf8 nm
-
-delete :: forall a  b . RecExpr a => Table a -> (a -> Deleting a b) -> Update b
-delete (Table nm) f = do
-  alias <- grabName
-  let r = mkRecExpr (alias <> char8 '.') (undefined :: a)
-      q = nameBld <> " AS " <> alias
-      upd = f r
-  compileDeleting q upd
-  where
-     nameBld = escapeIdentifier $ T.encodeUtf8 nm
-
-
-insert :: forall a . RecExpr a => Table a -> Query (UpdExpr a) -> Update a
-insert (Table nm) mq = do
-  let r = mkRecExpr mempty (undefined :: a)
-  (UpdExpr upd, q) <- compIt mq
-  compileInserting (escapeIdent nm) $ q {queryAction = HashMap.toList upd}
-  return r
-
-insert' :: forall a b . RecExpr a => Table a -> Inserting a b -> Update a
-insert' (Table nm) upd = Update $ do
-  let r = mkRecExpr mempty (undefined :: a)
-  _ <- compileInserting' nameBld upd
-  return r
-  where
-      nameBld = escapeIdentifier $ T.encodeUtf8 nm
--}
