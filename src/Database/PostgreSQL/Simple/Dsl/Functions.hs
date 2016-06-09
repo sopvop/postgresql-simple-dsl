@@ -20,12 +20,28 @@ module Database.PostgreSQL.Simple.Dsl.Functions
        , array_to_string2
        , least
        , greatest
+
+       -- * range functions
+       , rangeLower
+       , rangeUpper
+       , rangeIsEmpty
+       , rangeLowerInf
+       , rangeLowerInc
+       , rangeUpperInf
+       , rangeUpperInc
+
+       , rangeElem
+       , rangeContains
+       , rangesOverlap
+       , rangeAdjacentTo
+
        ) where
 
 import Data.ByteString.Builder          (byteString, char8)
 import Data.Int
 import Data.Monoid
 import Data.Text                        (Text)
+import Database.PostgreSQL.Simple.Range (PGRange)
 import Database.PostgreSQL.Simple.Types (PGArray (..))
 
 import Database.PostgreSQL.Simple.Dsl.Internal
@@ -117,3 +133,37 @@ greatest ea eb = fromExpr $ Expr 0
 
 {-# SPECIALIZE greatest :: Expr a -> Expr a -> Expr a #-}
 {-# SPECIALIZE greatest :: ExprA a -> ExprA a -> ExprA a #-}
+
+
+rangeLower :: Expr (PGRange a) -> Expr (Maybe a)
+rangeLower r = call . arg r $ function "lower"
+
+rangeUpper :: Expr (PGRange a) -> Expr (Maybe a)
+rangeUpper r = call . arg r $ function "upper"
+
+rangeIsEmpty :: Expr (PGRange a) -> Expr Bool
+rangeIsEmpty r = call . arg r $ function "isempty"
+
+rangeLowerInf :: Expr (PGRange a) -> Expr Bool
+rangeLowerInf r = call . arg r $ function "lower_inf"
+
+rangeLowerInc :: Expr (PGRange a) -> Expr Bool
+rangeLowerInc r = call . arg r $ function "lower_inc"
+
+rangeUpperInf :: Expr (PGRange a) -> Expr Bool
+rangeUpperInf r = call . arg r $ function "upper_inf"
+
+rangeUpperInc :: Expr (PGRange a) -> Expr Bool
+rangeUpperInc r = call . arg r $ function "upper_inc"
+
+rangeElem :: Expr (PGRange a) -> Expr a -> Expr Bool
+rangeElem = binOp 10 "@>"
+
+rangeContains :: Expr (PGRange a) -> Expr (PGRange a) -> Expr Bool
+rangeContains = binOp 10 "@>"
+
+rangesOverlap :: Expr (PGRange a) -> Expr (PGRange a) -> Expr Bool
+rangesOverlap = binOp 10 "&&"
+
+rangeAdjacentTo :: Expr (PGRange a) -> Expr (PGRange a) -> Expr Bool
+rangeAdjacentTo = binOp 10 "-|-"

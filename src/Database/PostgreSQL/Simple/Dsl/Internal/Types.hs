@@ -14,7 +14,6 @@ import Control.Monad.State.Class
 import Control.Monad.Trans.State (State, StateT)
 
 import Data.Monoid ((<>))
-import Data.Text   (Text)
 
 import Data.ByteString.Builder (Builder, char8, intDec)
 
@@ -49,7 +48,7 @@ class Monad m => HasNameSource m where
 
 instance Monad m => HasNameSource (StateT NameSource m) where
   grabNS = get
-  modifyNS f = modify f
+  modifyNS = modify
   {-# INLINE grabNS #-}
   {-# INLINE modifyNS #-}
 

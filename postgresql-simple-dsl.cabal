@@ -30,15 +30,15 @@ library
      Database.PostgreSQL.Simple.Dsl.Escaping
   other-modules:
   -- other-extensions:
-  build-depends: base >= 4.7 && < 5
-               , bytestring
-               , mtl
-               , postgresql-libpq
-               , postgresql-simple
-               , text
-               , time
-               , transformers
-               , unordered-containers
+  build-depends: base                    >= 4.8.2.0  && < 4.9
+               , bytestring              >= 0.10.6   && < 0.11
+               , mtl                     >= 2.2.1    && < 2.3
+               , postgresql-libpq        >= 0.9.1.1  && < 0.10
+               , postgresql-simple       >= 0.5.1.3  && < 0.6
+               , text                    >= 1.2.2.1  && < 1.3
+               , time                    >= 1.5.0.1  && < 1.6
+               , transformers            >= 0.4.2    && < 0.6
+               , unordered-containers    >= 0.2.7    && < 0.3
                , vinyl
 
   hs-source-dirs:      src
