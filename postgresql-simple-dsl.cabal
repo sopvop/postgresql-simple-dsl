@@ -2,7 +2,7 @@
 -- further documentation, see http://haskell.org/cabal/users-guide/
 
 name:                postgresql-simple-dsl
-version:             0.5.0.0
+version:             0.5.1.0
 synopsis:            PostgreSQL EDSL built on top of postgresql-simple
 -- description:
 homepage:            https://github.com/sopvop/postgresql-simple-dsl

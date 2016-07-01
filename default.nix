@@ -4,7 +4,7 @@
 }:
 mkDerivation {
   pname = "postgresql-simple-dsl";
-  version = "0.5.0.0";
+  version = "0.5.1.0";
   src = ./.;
   libraryHaskellDepends = [
     base bytestring mtl postgresql-libpq postgresql-simple text time
