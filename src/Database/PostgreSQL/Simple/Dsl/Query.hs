@@ -88,7 +88,11 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , Expr
      , val
      , val'
-     , (==.), (/=.), (<.), (<=.), (>.), (>=.), (||.), (&&.), ( ~.)
+     , (==.), (/=.), (<.), (<=.), (>.), (>=.), (||.), (&&.)
+     -- * Text search operators
+     , ( ~.), (~*.), (~~.), (~~*.)
+     , like, ilike
+     -- * Other
      , true, false, just, isNull, isInList
      , not_
      , exists
@@ -479,11 +483,29 @@ a ||. b = binOp 19 " OR " a b
 
 -- | Access field of relation
 not_ :: IsExpr expr => expr Bool -> expr Bool
-not_ r = prefOp 17 " NOT " r
+not_ = prefOp 17 " NOT "
 
--- | like operator
+-- | regexp operator
 (~.) :: Expr Text -> Expr Text -> Expr Bool
-(~.) a b = binOp 14 " ~ " a b
+(~.) = binOp 11 " ~ "
+
+-- | case insenstive regexp operator
+(~*.) :: Expr Text -> Expr Text -> Expr Bool
+(~*.) = binOp 11 " ~* "
+
+-- | LIKE operator
+(~~.) :: Expr Text -> Expr Text -> Expr Bool
+(~~.)  = binOp 11 " ~~ "
+
+-- | ILIKE operator
+(~~*.) :: Expr Text -> Expr Text -> Expr Bool
+(~~*.) = binOp 11 " ~~* "
+
+like :: Expr Text -> Expr Text -> Expr Bool
+like = binOp 11 " LIKE "
+
+ilike :: Expr Text -> Expr Text -> Expr Bool
+ilike = binOp 11 " ILIKE"
 
 isInList :: (IsExpr expr, ToField a) => expr a -> [a] -> expr Bool
 isInList _ [] = false
