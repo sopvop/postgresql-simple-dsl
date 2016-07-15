@@ -34,7 +34,7 @@ module Database.PostgreSQL.Simple.Dsl.Rec
   , RIndex (..)
   , RImage (..)
   , RSubset(..)
-  , (++) (..)
+  , (++)
   , ELens
   , elens
   , lcol
@@ -57,8 +57,8 @@ import Database.PostgreSQL.Simple.Types (QualifiedIdentifier (..))
 
 import Database.PostgreSQL.Simple.Dsl.Escaping
 import Database.PostgreSQL.Simple.Dsl.Internal
-import Database.PostgreSQL.Simple.Dsl.Types
 import Database.PostgreSQL.Simple.Dsl.Lens
+import Database.PostgreSQL.Simple.Dsl.Types
 import Database.PostgreSQL.Simple.FromField    (FromField (..))
 
 
