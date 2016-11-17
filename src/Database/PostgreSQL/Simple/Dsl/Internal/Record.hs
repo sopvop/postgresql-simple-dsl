@@ -1,9 +1,11 @@
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DefaultSignatures      #-}
+{-# LANGUAGE DeriveFunctor          #-}
 {-# LANGUAGE DeriveGeneric          #-}
 {-# LANGUAGE FlexibleContexts       #-}
 {-# LANGUAGE FlexibleInstances      #-}
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE MultiParamTypeClasses  #-}
+{-# LANGUAGE OverloadedStrings      #-}
 {-# LANGUAGE RankNTypes             #-}
 {-# LANGUAGE ScopedTypeVariables    #-}
 {-# LANGUAGE TypeOperators          #-}
@@ -43,7 +45,7 @@ instance (GToColumnsCon a , GToColumnsCon b ) => GToColumnsCon (a :*: b) where
   gToColumnsCon f prefix = gToColumnsCon f prefix :*: gToColumnsCon f prefix
 
 
-instance (GToColumnsCon cls, Datatype d) => GToColumnsCon (D1 d (C1 c cls)) where
+instance (GToColumnsCon cls) => GToColumnsCon (D1 d (C1 c cls)) where
   gToColumnsCon f = M1 . M1 . gToColumnsCon f
 
 

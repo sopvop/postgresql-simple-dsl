@@ -404,11 +404,16 @@ compileQuery q = evalState comp (emptyQuery :: QueryState t)
      (r,q') <- compIt q
      return $ finishIt (asValues r) q'
 
-instance ToColumns a => FromItem (Function a) a where
+instance {-# OVERLAPPABLE #-}  ToColumns a => FromItem (Function a) a where
   fromItem (Function nm args) = From $ do
      alias <- grabName --Alias bs nameBld
      let r = toColumns (alias <> char8 '.')
      pure (escapeIdent nm <> char8 '(' <> commaSep args <> ") AS " <> alias, r)
+
+instance {-# OVERLAPPING #-} FromItem (Function (Expr a)) (Expr a) where
+  fromItem (Function nm args) = From $ do
+     alias <- grabName --Alias bs nameBld
+     pure (escapeIdent nm <> char8 '(' <> commaSep args <> ") AS " <> alias, Expr 0 alias)
 
 instance (IsRecord a) => FromItem (Query a) a where
   fromItem mq = From $ do
