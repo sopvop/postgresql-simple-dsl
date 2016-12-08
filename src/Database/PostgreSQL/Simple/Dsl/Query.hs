@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE RankNTypes            #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE TypeOperators         #-}
@@ -39,6 +40,7 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , innerJoin
      , crossJoin
      , Nullable
+     , (^?.)
      , justNullable
      , fromNullable
      , nullableParser
@@ -131,6 +133,7 @@ import Database.PostgreSQL.Simple ((:.) (..), Connection, Only (..))
 import qualified Database.PostgreSQL.Simple              as PG
 import           Database.PostgreSQL.Simple.Dsl.Escaping
 import           Database.PostgreSQL.Simple.Dsl.Internal
+import           Database.PostgreSQL.Simple.Dsl.Lens
 import           Database.PostgreSQL.Simple.Dsl.Types
 import           Database.PostgreSQL.Simple.ToField
 import qualified Database.PostgreSQL.Simple.Types        as PG
@@ -446,6 +449,9 @@ val = term . rawField
 
 val' :: (ToField a, IsExpr expr) => a -> expr a
 val' = fromExpr . term . rawField
+
+(^?.) :: Nullable a -> Lens' a (Expr b) -> Expr (Nulled b)
+r ^?. f = nulled (view f $ justNullable r)
 
 infixl 6 +., -.
 
