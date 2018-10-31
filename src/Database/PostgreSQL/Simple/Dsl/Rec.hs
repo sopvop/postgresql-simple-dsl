@@ -41,25 +41,27 @@ module Database.PostgreSQL.Simple.Dsl.Rec
   ) where
 
 
-import           Control.Applicative     (Const (..))
-import           Data.ByteString.Builder (char8)
+import           Control.Applicative                     (Const (..))
+import           Data.ByteString.Builder                 (char8)
 import           Data.Coerce
-import           Data.Monoid             ((<>))
+import           Data.Monoid                             ((<>))
 import           Data.Proxy
-import qualified Data.Text               as T
-import qualified Data.Text.Encoding      as T
+import qualified Data.Text                               as T
+import qualified Data.Text.Encoding                      as T
 
-import Data.Functor.Identity (Identity (..))
-import GHC.TypeLits          (KnownSymbol, symbolVal)
+import           Data.Functor.Identity                   (Identity (..))
+import           GHC.TypeLits
+    (KnownSymbol, symbolVal)
 
-import Database.PostgreSQL.Simple.Types (QualifiedIdentifier (..))
+import           Database.PostgreSQL.Simple.Types
+    (QualifiedIdentifier (..))
 
 
-import Database.PostgreSQL.Simple.Dsl.Escaping
-import Database.PostgreSQL.Simple.Dsl.Internal
-import Database.PostgreSQL.Simple.Dsl.Lens
-import Database.PostgreSQL.Simple.Dsl.Types
-import Database.PostgreSQL.Simple.FromField    (FromField (..))
+import           Database.PostgreSQL.Simple.Dsl.Escaping
+import           Database.PostgreSQL.Simple.Dsl.Internal
+import           Database.PostgreSQL.Simple.Dsl.Lens
+import           Database.PostgreSQL.Simple.Dsl.Types
+import           Database.PostgreSQL.Simple.FromField    (FromField (..))
 
 
 class NamesColumn a where
@@ -74,7 +76,7 @@ instance KnownSymbol t => NamesColumn t where
 
 
 newtype (:->) s a = Col { getCol :: a }
-        deriving (Eq,Ord,Num,Monoid,Real,RealFloat,RealFrac,Fractional,Floating, Functor)
+        deriving (Eq,Ord,Num,Semigroup,Monoid,Real,RealFloat,RealFrac,Fractional,Floating, Functor)
 
 instance forall s a. (KnownSymbol s, Show a) => Show (s :-> a) where
     show (Col x) = symbolVal (Proxy::Proxy s)++" :-> "++show x

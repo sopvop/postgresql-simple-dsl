@@ -19,34 +19,36 @@
 module Database.PostgreSQL.Simple.Dsl.Internal
        where
 
-import Control.Monad.Identity
-import Control.Monad.State.Class
-import Control.Monad.Trans.Reader (ReaderT, runReaderT)
-import Control.Monad.Trans.State  (State, evalState, execState, runState)
-import Control.Monad.Trans.Writer
+import           Control.Monad.Identity
+import           Control.Monad.State.Class
+import           Control.Monad.Trans.Reader              (ReaderT, runReaderT)
+import           Control.Monad.Trans.State
+    (State, evalState, execState, runState)
+import           Control.Monad.Trans.Writer
 
 import           Data.ByteString.Builder
     (Builder, char8, lazyByteString, toLazyByteString)
-import qualified Data.ByteString.Lazy    as Lazy
+import qualified Data.ByteString.Lazy                    as Lazy
 
-import Data.Coerce
-import Data.List   (intersperse)
-import Data.Monoid
+import           Data.Coerce
+import           Data.List                               (intersperse)
+import           Data.Semigroup
+    (Any (..), Semigroup (..))
 
-import           Data.Text          (Text)
-import qualified Data.Text.Encoding as Text
+import           Data.Text                               (Text)
+import qualified Data.Text.Encoding                      as Text
 
-import           Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as HashMap
+import           Data.HashMap.Strict                     (HashMap)
+import qualified Data.HashMap.Strict                     as HashMap
 
 
-import Database.PostgreSQL.Simple         ((:.) (..), Only (..))
-import Database.PostgreSQL.Simple.FromRow as PG
-import Database.PostgreSQL.Simple.ToField
+import           Database.PostgreSQL.Simple              ((:.) (..), Only (..))
+import           Database.PostgreSQL.Simple.FromRow      as PG
+import           Database.PostgreSQL.Simple.ToField
 
-import Database.PostgreSQL.Simple.Dsl.Escaping
-import Database.PostgreSQL.Simple.Dsl.Lens
-import Database.PostgreSQL.Simple.Dsl.Types
+import           Database.PostgreSQL.Simple.Dsl.Escaping
+import           Database.PostgreSQL.Simple.Dsl.Lens
+import           Database.PostgreSQL.Simple.Dsl.Types
 
 type LazyByteString = Lazy.ByteString
 
@@ -465,7 +467,7 @@ finishQueryNoRet mq = evalState finisher (emptyQuery :: QueryState ())
       return $ finishIt ["true"] q'
 
 newtype Sorting = Sorting [(RawExpr, RawExpr)]
-  deriving (Monoid)
+  deriving (Semigroup, Monoid)
 
 sortingEmpty :: Sorting -> Bool
 sortingEmpty (Sorting []) = True
@@ -479,11 +481,13 @@ compileSorting (Sorting r) = mconcat . intersperse (char8 ',')
 
 newtype UpdExpr a = UpdExpr { getUpdates :: HashMap LazyByteString RawExpr }
 
+instance Semigroup (UpdExpr a) where
+  UpdExpr a <> UpdExpr b = UpdExpr (a<>b)
+
 instance Monoid (UpdExpr a) where
   mempty = UpdExpr mempty
-  UpdExpr a `mappend` UpdExpr b = UpdExpr (a<>b)
 
-newtype Update a = Update { runUpdate :: QueryM (RawExpr) a }
+newtype Update a = Update { runUpdate :: QueryM RawExpr a }
    deriving (Functor, Applicative, Monad, HasNameSource)
 
 newtype Inserting r a = Inserting { runInserting :: QueryM (HashMap LazyByteString RawExpr) a }
