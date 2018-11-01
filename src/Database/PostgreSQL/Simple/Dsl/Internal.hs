@@ -556,7 +556,7 @@ finishUpdating table QueryState{..} =
   where
     (columns, exprs) = unzip $ HashMap.toList queryAction
     sets = char8 '(' <> commaSep (map lazyByteString columns)
-         <> ")=(" <> commaSep exprs <> char8 ')'
+         <> ")=ROW(" <> commaSep exprs <> char8 ')'
 
 
 compileDeleting :: RawExpr -> Deleting t b -> Update b
