@@ -554,9 +554,11 @@ finishUpdating table QueryState{..} =
          <> opt ("\nFROM " `fprepend` queryStateFrom)
          <> opt ("\nWHERE " `fprepend` queryStateWhere)
   where
-    (columns, exprs) = unzip $ HashMap.toList queryAction
-    sets = char8 '(' <> commaSep (map lazyByteString columns)
-         <> ")=ROW(" <> commaSep exprs <> char8 ')'
+    sets = mconcat
+         . intersperse (char8 ',')
+         . fmap go
+         $ HashMap.toList queryAction
+    go (column, value) = lazyByteString column <> "=" <> value
 
 
 compileDeleting :: RawExpr -> Deleting t b -> Update b
