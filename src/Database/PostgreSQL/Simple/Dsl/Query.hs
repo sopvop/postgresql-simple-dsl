@@ -21,7 +21,9 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , IsQuery
      , Query
      , query
+     , queryV
      , queryWith
+     , queryWithV
      , execute
      , formatQuery
      -- * From
@@ -119,24 +121,25 @@ module Database.PostgreSQL.Simple.Dsl.Query
      , groupBy
      , from'
      ) where
-import Control.Monad.State.Class
-import Control.Monad.Trans.State (runState)
+import           Control.Monad.State.Class
+import           Control.Monad.Trans.State (runState)
 
-import Data.ByteString            (ByteString)
-import Data.ByteString.Builder    (byteString, char8, toLazyByteString)
-import Data.ByteString.Lazy       (toStrict)
-import Data.Int                   (Int64)
-import Data.Monoid
-import Data.Text                  (Text)
-import Database.PostgreSQL.Simple ((:.) (..), Connection, Only (..))
+import           Data.ByteString (ByteString)
+import           Data.ByteString.Builder (byteString, char8, toLazyByteString)
+import           Data.ByteString.Lazy (toStrict)
+import           Data.Int (Int64)
+import           Data.Text (Text)
+import           Data.Vector (Vector)
+import           Database.PostgreSQL.Simple ((:.) (..), Connection, Only (..))
 
-import qualified Database.PostgreSQL.Simple              as PG
+import qualified Database.PostgreSQL.Simple as PG
 import           Database.PostgreSQL.Simple.Dsl.Escaping
 import           Database.PostgreSQL.Simple.Dsl.Internal
 import           Database.PostgreSQL.Simple.Dsl.Lens
 import           Database.PostgreSQL.Simple.Dsl.Types
 import           Database.PostgreSQL.Simple.ToField
-import qualified Database.PostgreSQL.Simple.Types        as PG
+import qualified Database.PostgreSQL.Simple.Types as PG
+import qualified Database.PostgreSQL.Simple.Vector as PGV
 
 -- $use
 --
@@ -431,8 +434,17 @@ queryWith c fromRec q = PG.queryWith_ parser c ( PG.Query $ buildQuery body)
   where
     (body, parser) = finishQuery fromRec q
 
+-- | Execute query and get results
+queryWithV :: Connection -> (a -> RecordParser r) -> Query a -> IO (Vector r)
+queryWithV c fromRec q = PGV.queryWith_ parser c ( PG.Query $ buildQuery body)
+  where
+    (body, parser) = finishQuery fromRec q
+
 query :: FromRecord a b => Connection -> Query a -> IO [b]
 query c q = queryWith c fromRecord q
+
+queryV :: FromRecord a b => Connection -> Query a -> IO (Vector b)
+queryV c q = queryWithV c fromRecord q
 
 -- | Execute discarding results, returns number of rows modified
 execute :: Connection -> Query r -> IO Int64

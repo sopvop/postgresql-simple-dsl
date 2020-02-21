@@ -16,7 +16,6 @@ import           Data.ByteString.Builder.Prim       (condB, liftFixedToBounded,
                                                      primMapByteStringBounded, (>$<),
                                                      (>*<))
 import qualified Data.ByteString.Builder.Prim       as P
-import           Data.Monoid
 import           Data.Word                          (Word8)
 
 import           Database.PostgreSQL.Simple.ToField

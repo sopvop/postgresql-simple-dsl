@@ -1,9 +1,7 @@
 {-# LANGUAGE DefaultSignatures      #-}
 {-# LANGUAGE DeriveFunctor          #-}
-{-# LANGUAGE DeriveGeneric          #-}
 {-# LANGUAGE FlexibleContexts       #-}
 {-# LANGUAGE FlexibleInstances      #-}
-{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE MultiParamTypeClasses  #-}
 {-# LANGUAGE OverloadedStrings      #-}
 {-# LANGUAGE RankNTypes             #-}
@@ -25,7 +23,7 @@ import Database.PostgreSQL.Simple.Dsl.Internal.Types
 
 import GHC.Generics
 
-data ToColumnsConfig = ToColumnsConfig
+newtype ToColumnsConfig = ToColumnsConfig
   { toColumnsConfigName :: (Maybe (String -> String))
   }
 
