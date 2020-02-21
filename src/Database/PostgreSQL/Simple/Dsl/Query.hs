@@ -86,6 +86,8 @@ module Database.PostgreSQL.Simple.Dsl.Query
      -- * Executing updates
      , queryUpdate
      , queryUpdateWith
+     , queryUpdateV
+     , queryUpdateWithV
      , executeUpdate
      , formatUpdate
      -- * Expressions
@@ -574,9 +576,20 @@ queryUpdateWith con fromRec u = do
   where
     (body, parser) = finishUpdate fromRec u
 
+queryUpdateWithV :: Connection -> (a -> RecordParser b) -> Update a -> IO (Vector b)
+queryUpdateWithV con fromRec u = do
+    let q = buildQuery body
+    PGV.queryWith_ parser con (PG.Query q)
+  where
+    (body, parser) = finishUpdate fromRec u
+
 queryUpdate :: FromRecord a b => Connection -> Update a -> IO [b]
 queryUpdate con u = queryUpdateWith con fromRecord u
 {-# INLINE queryUpdate #-}
+
+queryUpdateV :: FromRecord a b => Connection -> Update a -> IO (Vector b)
+queryUpdateV con u = queryUpdateWithV con fromRecord u
+{-# INLINE queryUpdateV #-}
 
 formatUpdate :: IsRecord t => Update t -> ByteString
 formatUpdate u = buildQuery (compileUpdate u)
