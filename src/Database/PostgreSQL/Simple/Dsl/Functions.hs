@@ -37,15 +37,14 @@ module Database.PostgreSQL.Simple.Dsl.Functions
 
        ) where
 
-import Data.ByteString.Builder          (byteString, char8)
-import Data.Int
-import Data.Monoid
-import Data.Text                        (Text)
-import Database.PostgreSQL.Simple.Range (PGRange)
-import Database.PostgreSQL.Simple.Types (PGArray (..))
+import           Data.ByteString.Builder (byteString, char8)
+import           Data.Int
+import           Data.Text (Text)
+import           Data.Vector (Vector)
+import           Database.PostgreSQL.Simple.Range (PGRange)
 
-import Database.PostgreSQL.Simple.Dsl.Internal
-import Database.PostgreSQL.Simple.Dsl.Types
+import           Database.PostgreSQL.Simple.Dsl.Internal
+import           Database.PostgreSQL.Simple.Dsl.Types
 
 count :: Expr a -> ExprA Int64
 count (Expr _ a) = ExprA . Expr 0 $ byteString "count(" <> a <> char8 ')'
@@ -65,7 +64,7 @@ max_ (Expr _ a) = ExprA $ Expr 0 (byteString "max(" <> a <> char8 ')')
 min_ :: Expr a -> ExprA (Nulled a)
 min_ (Expr _ a) = ExprA $ Expr 0 (byteString "min(" <> a <> char8 ')')
 
-array_agg :: (Expr a) -> ExprA (Maybe (PGArray a))
+array_agg :: (Expr a) -> ExprA (Maybe (Vector a))
 array_agg (Expr _ a) = ExprA . Expr 0 $ byteString "array_agg(" <> a <> byteString ")"
 
 
@@ -86,31 +85,31 @@ coalesce = flip coalesce'
 {-# SPECIALISE coalesce :: ExprA a -> ExprA (Maybe a) -> ExprA a #-}
 
 
-array :: Expr a -> Expr (PGArray a)
+array :: Expr a -> Expr (Vector a)
 array (Expr _ r) = term $ byteString "ARRAY["<> r <> char8 ']'
 
-array_append :: Expr (PGArray a) -> Expr a -> Expr (PGArray a)
+array_append :: Expr (Vector a) -> Expr a -> Expr (Vector a)
 array_append (Expr _ arr) (Expr _ v) = Expr 0 $ byteString "array_append("
              <> arr <> byteString "," <> v <> char8 ')'
 
-array_prepend :: Expr a -> Expr (PGArray a) -> Expr (PGArray a)
+array_prepend :: Expr a -> Expr (Vector a) -> Expr (Vector a)
 array_prepend (Expr _ v) (Expr _ arr) = Expr 0 $
   byteString "array_prepend(" <> v <> byteString "," <> arr <> char8 ')'
-array_cat :: Expr (PGArray a) -> Expr (PGArray a) -> Expr (PGArray a)
+array_cat :: Expr (Vector a) -> Expr (Vector a) -> Expr (Vector a)
 array_cat (Expr _ a) (Expr _ b) = Expr 0 $
   byteString "array_cat(" <> a <> byteString "," <> b <> char8 ')'
 
-array_empty :: (Expr (PGArray a))
+array_empty :: (Expr (Vector a))
 array_empty = term $ byteString "ARRAY[]"
 
 -- | operator @>
-array_contains :: Expr (PGArray a) -> Expr (PGArray a) -> Expr Bool
+array_contains :: Expr (Vector a) -> Expr (Vector a) -> Expr Bool
 array_contains a b = binOp 10 (byteString "@>") a b
 
-array_to_string :: Expr (PGArray a) -> Expr Text -> Expr Text
+array_to_string :: Expr (Vector a) -> Expr Text -> Expr Text
 array_to_string a b = call . arg b . arg a $ function "array_to_string"
 
-array_to_string2 :: Expr (PGArray a) -> Expr Text -> Expr Text -> Expr Text
+array_to_string2 :: Expr (Vector a) -> Expr Text -> Expr Text -> Expr Text
 array_to_string2 a b c = call . arg c . arg b . arg a $ function "array_to_string"
 
 least :: IsExpr expr => expr a -> expr a -> expr a
