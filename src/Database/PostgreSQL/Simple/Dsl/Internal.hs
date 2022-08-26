@@ -6,7 +6,6 @@
 {-# LANGUAGE FunctionalDependencies     #-}
 {-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE PolyKinds                  #-}
 {-# LANGUAGE RankNTypes                 #-}
@@ -29,11 +28,11 @@ import           Control.Monad.Trans.Writer
 import           Data.ByteString.Builder
     (Builder, char8, lazyByteString, toLazyByteString)
 import qualified Data.ByteString.Lazy                    as Lazy
-
+import Data.Kind (Type)
 import           Data.Coerce
 import           Data.List                               (intersperse)
 import           Data.Semigroup
-    (Any (..), Semigroup (..))
+    (Any (..))
 
 import           Data.Text                               (Text)
 import qualified Data.Text.Encoding                      as Text
@@ -112,12 +111,12 @@ instance n ~ Nulled a => NulledRecord (Expr a) (Expr n) where
   nulled = coerce
   {-# INLINE nulled #-}
 
-instance (n1 ~Nulled e1, n2 ~ Nulled e2) =>
+instance (n1 ~ Nulled e1, n2 ~ Nulled e2) =>
    NulledRecord (Expr e1, Expr e2) (Expr n1, Expr n2) where
   nulled = coerce
   {-# INLINE nulled #-}
 
-instance (n1 ~Nulled e1, n2 ~ Nulled e2, n3 ~ Nulled e3) =>
+instance (n1 ~ Nulled e1, n2 ~ Nulled e2, n3 ~ Nulled e3) =>
    NulledRecord (Expr e1, Expr e2, Expr e3) (Expr n1, Expr n2, Expr n3) where
   nulled = coerce
   {-# INLINE nulled #-}
@@ -129,7 +128,7 @@ instance (NulledRecord a na , NulledRecord b nb)
 
 
 class ToRecord a where
-  type AsRecord a :: *
+  type AsRecord a :: Type
   toRecord :: a -> AsRecord a
 
 instance ToField a => ToRecord (Only a) where
@@ -191,7 +190,7 @@ instance IsExpr ExprA where
 newtype ExprA a = ExprA { fromExprA :: Expr a }
 
 class IsRecord (AggRecord a) => IsAggregate a where
-  type AggRecord a :: *
+  type AggRecord a :: Type
   fromAggr :: a -> AggRecord a
 
 instance IsAggregate (ExprA a) where

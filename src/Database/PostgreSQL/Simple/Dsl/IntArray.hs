@@ -5,7 +5,6 @@ module Database.PostgreSQL.Simple.Dsl.IntArray
 import Prelude hiding (concat)
 
 import Data.ByteString.Builder (byteString, char8)
-import Data.Monoid
 
 import Database.PostgreSQL.Simple.Dsl.Internal
 import Database.PostgreSQL.Simple.Dsl.Types

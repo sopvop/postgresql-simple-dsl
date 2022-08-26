@@ -1,10 +1,7 @@
-{-# LANGUAGE DeriveFunctor          #-}
 {-# LANGUAGE FlexibleInstances      #-}
 {-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE MultiParamTypeClasses  #-}
 {-# LANGUAGE ScopedTypeVariables    #-}
 {-# LANGUAGE TypeFamilies           #-}
-{-# LANGUAGE TypeOperators          #-}
 module Database.PostgreSQL.Simple.Dsl.Internal.Types
   where
 
@@ -12,8 +9,6 @@ import Control.Applicative       ((<|>))
 import Control.Monad             (replicateM_)
 import Control.Monad.State.Class
 import Control.Monad.Trans.State (State, StateT)
-
-import Data.Monoid ((<>))
 
 import Data.ByteString.Builder (Builder, char8, intDec)
 
