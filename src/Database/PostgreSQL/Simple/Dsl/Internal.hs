@@ -18,7 +18,6 @@
 module Database.PostgreSQL.Simple.Dsl.Internal
        where
 
-import           Control.Monad.Identity
 import           Control.Monad.State.Class
 import           Control.Monad.Trans.Reader              (ReaderT, runReaderT)
 import           Control.Monad.Trans.State
@@ -33,6 +32,7 @@ import           Data.Coerce
 import           Data.List                               (intersperse)
 import           Data.Semigroup
     (Any (..))
+import Data.Foldable(for_)
 
 import           Data.Text                               (Text)
 import qualified Data.Text.Encoding                      as Text
@@ -369,20 +369,20 @@ appendGroupBy e = Aggregator . modify $ \st ->
 
 finishIt :: [RawExpr] -> QueryState t -> RawExpr
 finishIt expr QueryState{..} = execWriter $ do
-  forM_ queryStateWith $ \w -> tell (withStart <> w)
+  for_ queryStateWith $ \w -> tell (withStart <> w)
   tell $ ("\nSELECT ")
   tell $ distinct queryStateDistinct
   tell $ commaSep expr
-  forM_ queryStateFrom $ \f -> tell ("\nFROM " <> f)
-  forM_ queryStateWhere $ \w -> tell ("\nWHERE " <> w)
-  forM_ queryStateGroupBy $ \b -> do
+  for_ queryStateFrom $ \f -> tell ("\nFROM " <> f)
+  for_ queryStateWhere $ \w -> tell ("\nWHERE " <> w)
+  for_ queryStateGroupBy $ \b -> do
      tell $ "\nGROUP BY " <> b
-  forM_ queryStateHaving $ \b -> do
+  for_ queryStateHaving $ \b -> do
      tell $ "\nHAVING " <> b
-  forM_ order $ \o -> tell ("\nORDER BY " <> compileSorting o)
-  forM_ queryStateLimit $ \l -> do
+  for_ order $ \o -> tell ("\nORDER BY " <> compileSorting o)
+  for_ queryStateLimit $ \l -> do
      tell $ "\nLIMIT " <> escapeAction (toField l)
-  forM_ queryStateOffset $ \o -> do
+  for_ queryStateOffset $ \o -> do
      tell $ "\nOFFSET " <> escapeAction (toField o)
   where
     distinct d = case d of
